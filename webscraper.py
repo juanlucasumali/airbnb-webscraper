@@ -13,11 +13,14 @@ import json
 import os
 from datetime import datetime
 import re
+from groq import Groq
+from dotenv import load_dotenv
 
 class AirbnbScraper:
     def __init__(self):
         self.setup_driver()
         self.results = []
+        self.setup_groq()
         
     def setup_driver(self):
         """Set up the Chrome driver with appropriate options"""
@@ -29,6 +32,11 @@ class AirbnbScraper:
         
         service = Service(ChromeDriverManager().install())
         self.driver = webdriver.Chrome(service=service, options=chrome_options)
+        
+    def setup_groq(self):
+        """Set up the Groq client"""
+        load_dotenv()
+        self.groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
         
     def handle_popups(self):
         """Handle any popups that might appear"""
@@ -54,6 +62,262 @@ class AirbnbScraper:
             return element.is_displayed()
         except:
             return False
+
+    def check_amenities_with_groq(self, amenities_text):
+        """Use Groq to analyze amenities text"""
+        target_amenities = ["TV", "Pool", "Jacuzzi", "Billiards/Pool Table", 
+                          "Large Yard", "Balcony", "Laundry", "Home Gym"]
+        
+        prompt = f"""
+        Given the following amenities text from an Airbnb listing:
+        {amenities_text}
+        
+        Please analyze if the following amenities are present (exactly or similar terms):
+        {', '.join(target_amenities)}
+        
+        Return ONLY a JSON object in this exact format, with no additional text:
+        {{
+            "TV": true/false,
+            "Pool": true/false,
+            "Jacuzzi": true/false,
+            "Billiards/Pool Table": true/false,
+            "Large Yard": true/false,
+            "Balcony": true/false,
+            "Laundry": true/false,
+            "Home Gym": true/false
+        }}
+        
+        Consider similar terms (e.g., "Swimming pool" for "Pool", "Hot tub" for "Jacuzzi", etc.)
+        """
+        
+        try:
+            chat_completion = self.groq_client.chat.completions.create(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are a JSON-only assistant. You must respond with valid JSON objects only, no additional text or explanation."
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                model="llama-3.3-70b-versatile",
+            )
+            
+            response = chat_completion.choices[0].message.content.strip()
+            print("\nGroq response:", response)  # Debug print
+            
+            # Try to clean the response if it's not pure JSON
+            try:
+                return json.loads(response)
+            except:
+                # Try to extract JSON if there's additional text
+                import re
+                json_match = re.search(r'\{.*\}', response, re.DOTALL)
+                if json_match:
+                    return json.loads(json_match.group())
+                raise Exception("Could not extract valid JSON from response")
+            
+        except Exception as e:
+            print(f"Error analyzing amenities with Groq: {str(e)}")
+            # Return a default structure instead of None
+            return {
+                "TV": False,
+                "Pool": False,
+                "Jacuzzi": False,
+                "Billiards/Pool Table": False,
+                "Large Yard": False,
+                "Balcony": False,
+                "Laundry": False,
+                "Home Gym": False,
+                "error": str(e)
+            }
+
+    def get_amenities_text(self):
+        """Click show all amenities button and extract amenities text"""
+        try:
+            print("\nTrying to access amenities...")
+            
+            # First make sure we're on the right part of the page
+            self.driver.execute_script("window.scrollBy(0, 500);")
+            time.sleep(1)
+            
+            # Try multiple selectors for the button
+            selectors = [
+                '//*[@id="site-content"]/div/div[1]/div[3]/div/div[1]/div/div[7]/div/div[2]/section/div[3]/button',  # Original XPath
+                "//button[contains(., 'Show all amenities')]",  # Text content
+                "//button[contains(@aria-label, 'amenities')]",  # Aria label
+                "//div[contains(@data-section-id, 'AMENITIES')]//button",  # Section + button
+                "//button[.//span[contains(text(), 'Show all')]]"  # Nested span with text
+            ]
+            
+            show_all_button = None
+            for selector in selectors:
+                print(f"Trying selector: {selector}")
+                try:
+                    show_all_button = WebDriverWait(self.driver, 3).until(
+                        EC.presence_of_element_located((By.XPATH, selector))
+                    )
+                    if show_all_button:
+                        print(f"Found button using selector: {selector}")
+                        break
+                except:
+                    continue
+            
+            if not show_all_button:
+                raise Exception("Could not find 'Show all amenities' button with any selector")
+            
+            print("Found button, scrolling to it...")
+            self.scroll_to_element(show_all_button)
+            time.sleep(1)
+            
+            print("Attempting to click button...")
+            try:
+                show_all_button.click()
+            except:
+                self.driver.execute_script("arguments[0].click();", show_all_button)
+            
+            print("Button clicked, waiting for modal...")
+            time.sleep(1.5)
+            
+            # Try multiple selectors for the modal content
+            modal_selectors = [
+                '/html/body/div[9]/div/div/section/div/div/div[2]/div/div[3]/div/div/div/section/section',  # Original XPath
+                "div[role='dialog'] section",  # CSS selector
+                "//div[@role='dialog']//div[@role='group']",  # Role-based XPath
+                "//div[contains(@aria-label, 'amenities')]"  # Aria label
+            ]
+            
+            modal = None
+            for selector in modal_selectors:
+                print(f"Trying modal selector: {selector}")
+                try:
+                    if selector.startswith("//"):
+                        modal = WebDriverWait(self.driver, 3).until(
+                            EC.presence_of_element_located((By.XPATH, selector))
+                        )
+                    else:
+                        modal = WebDriverWait(self.driver, 3).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                        )
+                    if modal:
+                        print(f"Found modal using selector: {selector}")
+                        break
+                except:
+                    continue
+            
+            if not modal:
+                raise Exception("Could not find amenities modal with any selector")
+            
+            # Get all amenity items
+            print("Extracting amenities text...")
+            amenities_text = modal.text
+            
+            if not amenities_text:
+                print("Warning: No amenities text found in modal")
+                return None
+            
+            print(f"\nFound amenities text: {amenities_text[:100]}...")
+            return amenities_text
+            
+        except Exception as e:
+            print(f"Error getting amenities: {str(e)}")
+            return None
+
+    def check_historical_house(self, page_text):
+        """Check if the listing is a historical house"""
+        historical_terms = ['historic', 'historical', 'heritage', 'landmark', 'period', 'century']
+        prompt = f"""
+        Given the following listing description:
+        {page_text}
+        
+        Analyze if this is a historical house based on mentions of: {', '.join(historical_terms)}
+        Return ONLY a JSON object in this format:
+        {{
+            "is_historical": true/false,
+            "evidence": "brief explanation or relevant text snippet"
+        }}
+        """
+        
+        try:
+            chat_completion = self.groq_client.chat.completions.create(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are a JSON-only assistant. Respond with valid JSON only."
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                model="llama-3.3-70b-versatile",
+            )
+            
+            response = chat_completion.choices[0].message.content.strip()
+            print("\nGroq historical response:", response)  # Debug print
+            
+            # Try to clean the response if it's not pure JSON
+            try:
+                return json.loads(response)
+            except:
+                # Try to extract JSON if there's additional text
+                import re
+                json_match = re.search(r'\{.*\}', response, re.DOTALL)
+                if json_match:
+                    return json.loads(json_match.group())
+                raise Exception("Could not extract valid JSON from response")
+            
+        except Exception as e:
+            print(f"Error analyzing historical status: {str(e)}")
+            return {"is_historical": False, "evidence": "Error in analysis"}
+
+    def extract_missing_details(self, full_content, missing_fields):
+        """Use Groq to extract missing details from the full page content"""
+        prompt = f"""
+        Given the following Airbnb listing content:
+        {full_content}
+        
+        Extract these missing fields: {', '.join(missing_fields)}
+        Return ONLY a JSON object with the found values, like:
+        {{
+            "field_name": "extracted value"
+        }}
+        """
+        
+        try:
+            chat_completion = self.groq_client.chat.completions.create(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are a JSON-only assistant. Respond with valid JSON only."
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                model="llama-3.3-70b-versatile",
+            )
+            
+            response = chat_completion.choices[0].message.content.strip()
+            print("\nGroq missing details response:", response)  # Debug print
+            
+            # Try to clean the response if it's not pure JSON
+            try:
+                return json.loads(response)
+            except:
+                # Try to extract JSON if there's additional text
+                import re
+                json_match = re.search(r'\{.*\}', response, re.DOTALL)
+                if json_match:
+                    return json.loads(json_match.group())
+                raise Exception("Could not extract valid JSON from response")
+            
+        except Exception as e:
+            print(f"Error extracting missing details: {str(e)}")
+            return {}
 
     def scrape_url(self, url, num_pages=5):
         """
@@ -120,7 +384,7 @@ class AirbnbScraper:
                         WebDriverWait(self.driver, 5).until(lambda d: len(d.window_handles) > 1)  # Reduced from 10 to 5
                         new_window = [window for window in self.driver.window_handles if window != original_window][0]
                         self.driver.switch_to.window(new_window)
-                        time.sleep(1.5)  # Reduced from 3 to 1.5
+                        time.sleep(5)  # Reduced from 3 to 1.5
                         print("Successfully switched to new tab")
 
                         # Define XPaths
@@ -178,10 +442,62 @@ class AirbnbScraper:
                             "url": self.driver.current_url
                         }
                         
+                        try:
+                            # Check for Guest Favorite badge
+                            try:
+                                guest_favorite = self.driver.find_element(
+                                    By.XPATH,
+                                    '//*[@id="site-content"]/div/div[1]/div[4]/div/div/div/div[2]/div/section/div[1]/div[2]'
+                                ).is_displayed()
+                                print(f"Guest Favorite: {guest_favorite}")
+                            except:
+                                guest_favorite = False
+                                print("Guest Favorite badge not found")
+
+                            # Get full page content for historical analysis
+                            full_content = self.driver.find_element(
+                                By.XPATH,
+                                '//*[@id="site-content"]/div/div[1]'
+                            ).text
+                            
+                            # Check for historical house
+                            historical_analysis = self.check_historical_house(full_content)
+                            print("\nHistorical analysis:", json.dumps(historical_analysis, indent=2))
+
+                            # Update listing_details with new information
+                            listing_details.update({
+                                "is_guest_favorite": guest_favorite,
+                                "is_historical": historical_analysis["is_historical"],
+                                "historical_evidence": historical_analysis["evidence"]
+                            })
+
+                            # Get amenities text
+                            amenities_text = self.get_amenities_text()
+                            if amenities_text:
+                                print("\nAnalyzing amenities with Groq...")
+                                amenities_analysis = self.check_amenities_with_groq(amenities_text)
+                                if amenities_analysis:
+                                    listing_details["amenities_analysis"] = amenities_analysis
+                                    print("\nAmenities analysis:")
+                                    print(json.dumps(amenities_analysis, indent=2))
+                        except Exception as e:
+                            print(f"Error processing amenities: {str(e)}")
+                            listing_details["amenities_analysis"] = {}
+                        
                         print("\nProcessed listing details:")
                         print("-" * 30)
                         print(json.dumps(listing_details, indent=2))
                         
+                        # After all extractions, check for missing fields
+                        missing_fields = [k for k, v in listing_details.items() if v == "N/A"]
+                        if missing_fields:
+                            print(f"\nAttempting to extract missing fields: {missing_fields}")
+                            additional_details = self.extract_missing_details(full_content, missing_fields)
+                            for field, value in additional_details.items():
+                                if field in missing_fields and value:
+                                    listing_details[field] = value
+                                    print(f"Updated {field} to: {value}")
+
                         all_listings.append(listing_details)
                         
                         # Save progress after each listing
@@ -195,7 +511,7 @@ class AirbnbScraper:
                         self.driver.switch_to.window(original_window)
                         time.sleep(1)  # Reduced from 2 to 1
                         print("Successfully switched back to main window")
-                        
+                    
                     except Exception as e:
                         print(f"\nError processing listing {index}: {str(e)}")
                         # Make sure we're back on the original window
@@ -213,10 +529,10 @@ class AirbnbScraper:
                 print("Timeout waiting for listings to load")
             except Exception as e:
                 print(f"Error processing listings: {str(e)}")
-                
+                    
         except Exception as e:
             print(f"Error accessing URL: {str(e)}")
-
+    
     def _calculate_price_per_night(self, details):
         """Helper method to calculate price per night"""
         try:
@@ -226,7 +542,7 @@ class AirbnbScraper:
             return str(int(total_price) // num_nights) if num_nights > 0 else total_price
         except:
             return "N/A"
-
+    
     def _parse_page(self):
         """Parse the current page and extract listing information"""
         soup = BeautifulSoup(self.driver.page_source, 'html.parser')

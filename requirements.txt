@@ -4,3 +4,4 @@ pandas
 webdriver-manager
 requests
 python-dotenv 
+groq
