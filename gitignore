@@ -1,4 +1,7 @@
 .venv
 .env
-env
 listing_details
+gitignore
+env
+runs
+.DS_Store
