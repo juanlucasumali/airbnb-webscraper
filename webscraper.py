@@ -628,15 +628,16 @@ class AirbnbScraper:
 
                             # Extract all details
                             details = {}
-                            print("\nExtracting listing details:")
-                            print("-" * 30)
+                            print("\nExtracting listing details")
+                            # print("\nExtracting listing details:")
+                            # print("-" * 30)
                             for key, xpath in xpaths.items():
                                 try:
                                     element = WebDriverWait(self.driver, 5).until(  # Reduced from 10 to 5
                                         EC.presence_of_element_located((By.XPATH, xpath))
                                     )
                                     details[key] = element.text
-                                    print(f"{key}: {details[key]}")
+                                    # print(f"{key}: {details[key]}")
                                 except:
                                     details[key] = "N/A"
                                     print(f"{key}: N/A (not found)")
@@ -664,7 +665,7 @@ class AirbnbScraper:
                                         By.XPATH,
                                         '//*[@id="site-content"]/div/div[1]/div[4]/div/div/div/div[2]/div/section/div[1]/div[2]'
                                     ).is_displayed()
-                                    print(f"Guest Favorite: {guest_favorite}")
+                                    # print(f"Guest Favorite: {guest_favorite}")
                                 except:
                                     guest_favorite = False
                                     print("Guest Favorite badge not found")
@@ -677,7 +678,7 @@ class AirbnbScraper:
                                 
                                 # Check for historical house using simple text matching
                                 historical_analysis = self.check_historical_house(full_content)
-                                print("\nHistorical analysis:", json.dumps(historical_analysis, indent=2))
+                                # print("\nHistorical analysis:", json.dumps(historical_analysis, indent=2))
 
                                 # Update listing_details with new information
                                 listing_details.update({
@@ -699,9 +700,10 @@ class AirbnbScraper:
                                 print(f"Error processing amenities: {str(e)}")
                                 listing_details["amenities_analysis"] = {}
                             
-                            print("\nProcessed listing details:")
-                            print("-" * 30)
-                            print(json.dumps(listing_details, indent=2))
+                            print("\nProcessed listing details.")
+                            # print("\nProcessed listing details:")
+                            # print("-" * 30)
+                            # print(json.dumps(listing_details, indent=2))
                             
                             # After all extractions, check for missing fields
                             missing_fields = [k for k, v in listing_details.items() if v == "N/A"]
