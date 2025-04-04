@@ -495,28 +495,6 @@ class AirbnbScraper:
                 self.handle_popups()
                 
                 try:
-                    # Get number of nights from the date range in header
-                    date_range_xpath = '/html/body/div[5]/div/div/div[1]/div/div[3]/header/div[1]/div/div/div/div/div[2]/div[1]/div/span[2]/button[2]/div'
-                    try:
-                        date_element = WebDriverWait(self.driver, 5).until(
-                            EC.presence_of_element_located((By.XPATH, date_range_xpath))
-                        )
-                        date_text = date_element.text.strip()
-                        print(f"Found date range: {date_text}")
-                        
-                        # Extract dates and calculate nights
-                        # Format example: "Apr 18 – 20"
-                        dates = re.findall(r'\d+', date_text)
-                        if len(dates) >= 2:
-                            num_nights = str(int(dates[1]) - int(dates[0]))
-                            print(f"Calculated {num_nights} nights from date range")
-                        else:
-                            num_nights = "2"  # Default if we can't parse the dates
-                            print("Could not parse dates, using default 2 nights")
-                    except Exception as e:
-                        print(f"Error getting date range: {str(e)}, using default 2 nights")
-                        num_nights = "2"
-
                     # Process grid items (existing code)
                     print("Waiting for listings grid to load...")
                     grid_items = WebDriverWait(self.driver, 5).until(
@@ -536,74 +514,88 @@ class AirbnbScraper:
                             print(f"Processing listing {index} of {len(grid_items)}")
                             print(f"{'='*50}")
                             
-                            # Get rating and price info from grid item first
-                            try:
-                                # Get rating and reviews
-                                rating_element = WebDriverWait(item, 3).until(
-                                    EC.presence_of_element_located((
-                                        By.XPATH, 
-                                        '//*[@id="site-content"]/div/div[2]/div/div/div/div/div/div[1]/div/div[2]/div/div/div/div/div/div[2]/div[5]/span/span[3]'
-                                    ))
-                                )
-                                rating_text = rating_element.get_attribute("innerText")
-                                rating_match = re.match(r"([\d.]+)\s*\((\d+)\)", rating_text)
-                                if rating_match:
-                                    rating = rating_match.group(1)
-                                    review_count = rating_match.group(2)
-                                    print(f"Found rating: {rating} with {review_count} reviews")
-                                else:
-                                    rating = "N/A"
-                                    review_count = "0"
-                                    print("Could not parse rating text")
-
-                                # Multiple possible XPaths for price element
-                                price_xpaths = [
-                                    '//*[@id="site-content"]/div/div[2]/div/div/div/div/div/div[1]/div/div[2]/div/div/div/div/div/div[2]/div[4]/div[2]/div/div/span/div[1]/div/span/div/button/span[1]',
-                                    '//*/html/body/div[5]/div/div/div[1]/div/div[3]/div[1]/main/div[2]/div/div[2]/div/div/div/div/div/div[5]/div/div[2]/div/div/div/div/div/div[2]/div[4]/div[2]/div/div/span/div/span/div/button/span[1]',
-                                    "//span[@class='_hb913q']"  # CSS class-based selector as fallback
-                                ]
-                                
-                                # Try each price XPath until we find one that works
-                                price_element = None
-                                for xpath in price_xpaths:
-                                    try:
-                                        price_element = WebDriverWait(item, 3).until(
-                                            EC.presence_of_element_located((By.XPATH, xpath))
-                                        )
-                                        if price_element:
-                                            break
-                                    except:
-                                        continue
-
-                                if not price_element:
-                                    raise Exception("Could not find price element with any XPath")
-
-                                price_text = price_element.text.strip()
-                                total_price = ''.join(filter(str.isdigit, price_text))
-                                print(f"Found price: ${total_price}")
-
-                                # Calculate price per night using the number of nights from header
-                                try:
-                                    price_per_night = str(int(total_price) // int(num_nights))
-                                    print(f"Calculated ${price_per_night} per night for {num_nights} nights")
-                                except:
-                                    price_per_night = total_price
-                                    print("Could not calculate price per night, using total price")
-
-                            except Exception as e:
-                                print(f"Warning: Could not extract price information: {str(e)}")
-                                total_price = "N/A"
-                                num_nights = "N/A"
-                                price_per_night = "N/A"
-
                             print("\nClicking listing and waiting for new tab...")
-                            item.click()
+                            try:
+                                item.click()
+                            except Exception as e:
+                                print(f"Error clicking item: {str(e)}")
+                                # Try using JavaScript click as fallback
+                                self.driver.execute_script("arguments[0].click();", item)
                             
                             # Switch to new tab with shorter timeout
                             WebDriverWait(self.driver, 5).until(lambda d: len(d.window_handles) > 1)
                             new_window = [window for window in self.driver.window_handles if window != original_window][0]
                             self.driver.switch_to.window(new_window)
                             print("Successfully switched to new tab")
+
+                            # Wait for page to load
+                            time.sleep(2)  # Give the page time to load
+
+                            # Get rating and price from the new tab
+                            rating = self.get_rating_from_tab()
+                            total_price = self.get_price_from_tab()
+
+                            # Get date range from new tab with retry logic
+                            max_retries = 3
+                            retry_count = 0
+                            while retry_count < max_retries:
+                                try:
+                                    check_in_xpath = '/html/body/div[5]/div/div/div[1]/div/div[2]/div[1]/div/div/div/div[1]/main/div/div[1]/div[3]/div/div[2]/div/div/div[1]/div/div/div/div/div/div/div[1]/div[2]/div/div/div/div[1]/div/div/button/div[1]/div[2]'
+                                    check_out_xpath = '/html/body/div[5]/div/div/div[1]/div/div[2]/div[1]/div/div/div/div[1]/main/div/div[1]/div[3]/div/div[2]/div/div/div[1]/div/div/div/div/div/div/div[1]/div[2]/div/div/div/div[1]/div/div/button/div[2]/div[2]'
+                                    
+                                    # Wait for elements to be present and visible
+                                    check_in_element = WebDriverWait(self.driver, 10).until(
+                                        EC.presence_of_element_located((By.XPATH, check_in_xpath))
+                                    )
+                                    check_out_element = WebDriverWait(self.driver, 10).until(
+                                        EC.presence_of_element_located((By.XPATH, check_out_xpath))
+                                    )
+                                    
+                                    # Ensure elements are visible
+                                    WebDriverWait(self.driver, 10).until(
+                                        EC.visibility_of(check_in_element)
+                                    )
+                                    WebDriverWait(self.driver, 10).until(
+                                        EC.visibility_of(check_out_element)
+                                    )
+                                    
+                                    check_in_date = check_in_element.text.strip()
+                                    check_out_date = check_out_element.text.strip()
+                                    
+                                    if not check_in_date or not check_out_date:
+                                        raise Exception("Empty date values")
+                                    
+                                    # Parse dates and calculate nights
+                                    from datetime import datetime
+                                    check_in = datetime.strptime(check_in_date, '%m/%d/%Y')
+                                    check_out = datetime.strptime(check_out_date, '%m/%d/%Y')
+                                    num_nights = str((check_out - check_in).days)
+                                    
+                                    print(f"Found check-in date: {check_in_date}")
+                                    print(f"Found check-out date: {check_out_date}")
+                                    print(f"Calculated {num_nights} nights")
+                                    
+                                    # Calculate price per night
+                                    try:
+                                        price_per_night = str(int(total_price) // int(num_nights))
+                                        print(f"Calculated ${price_per_night} per night for {num_nights} nights")
+                                    except:
+                                        price_per_night = total_price
+                                        print("Could not calculate price per night, using total price")
+                                    
+                                    break  # Success, exit retry loop
+                                        
+                                except Exception as e:
+                                    retry_count += 1
+                                    print(f"Attempt {retry_count} failed to get dates: {str(e)}")
+                                    if retry_count < max_retries:
+                                        print("Retrying...")
+                                        time.sleep(2)  # Wait before retrying
+                                    else:
+                                        print("Max retries reached, using default values")
+                                        num_nights = "2"
+                                        price_per_night = total_price
+                                        break
 
                             # Define XPaths
                             xpaths = {
@@ -650,7 +642,7 @@ class AirbnbScraper:
                                 "beds": self._extract_number(details["beds"]),
                                 "bathrooms": self._extract_number(details["baths"]),
                                 "stars": rating,
-                                "review_count": review_count,
+                                "review_count": details.get("reviews", "0"),
                                 "price_per_night": price_per_night,
                                 "total_price": total_price,
                                 "number_of_nights": num_nights,
@@ -835,6 +827,61 @@ class AirbnbScraper:
             numbers = re.findall(r'\d*\.?\d+', text)
             return numbers[0] if numbers else "N/A"
         except:
+            return "N/A"
+
+    def get_rating_from_tab(self):
+        """Extract rating and review count from the listing tab"""
+        try:
+            # Try to find the rating element with the specified class
+            rating_element = WebDriverWait(self.driver, 5).until(
+                EC.presence_of_element_located((
+                    By.CSS_SELECTOR,
+                    "#site-content > div > div:nth-child(1) > div:nth-child(3) > div > div._16e70jgn > div > div:nth-child(2) > div > div > div > a > div > div.a8jhwcl.atm_c8_vvn7el.atm_g3_k2d186.atm_fr_1vi102y.atm_9s_1txwivl.atm_ar_1bp4okc.atm_h_1h6ojuz.atm_cx_t94yts.atm_le_14y27yu.atm_c8_sz6sci__14195v1.atm_g3_17zsb9a__14195v1.atm_fr_kzfbxz__14195v1.atm_cx_1l7b3ar__14195v1.atm_le_1l7b3ar__14195v1.dir.dir-ltr > span"
+                ))
+            )
+            
+            rating_text = rating_element.text.strip()
+            # Extract the rating number from text like "Rated 4.98 out of 5 stars."
+            rating_match = re.search(r"Rated\s+([\d.]+)\s+out of 5 stars", rating_text)
+            
+            if rating_match:
+                rating = rating_match.group(1)
+                print(f"Found rating: {rating}")
+                return rating
+            else:
+                print("Could not parse rating text")
+                return "N/A"
+                
+        except Exception as e:
+            print(f"Error extracting rating: {str(e)}")
+            return "N/A"
+
+    def get_price_from_tab(self):
+        """Extract price from the listing tab"""
+        try:
+            # Try to find the price element with the specified class
+            price_element = WebDriverWait(self.driver, 5).until(
+                EC.presence_of_element_located((
+                    By.CSS_SELECTOR,
+                    "#site-content > div > div:nth-child(1) > div:nth-child(3) > div > div._1s21a6e2 > div > div > div:nth-child(1) > div > div > div > div > div > div > div._wgmchy > div._1k1ce2w > div > div > span > span"
+                ))
+            )
+            
+            price_text = price_element.text.strip()
+            # Extract the first price number from text like "$2,013 total, originally $2,318" or "$1,470 total"
+            price_match = re.search(r'\$([\d,]+)', price_text)
+            
+            if price_match:
+                # Remove commas and convert to integer
+                price = price_match.group(1).replace(',', '')
+                print(f"Found price: ${price}")
+                return price
+            else:
+                print("Could not parse price text")
+                return "N/A"
+                
+        except Exception as e:
+            print(f"Error extracting price: {str(e)}")
             return "N/A"
 
     def check_amenities_with_text_matching(self, amenities_text):
