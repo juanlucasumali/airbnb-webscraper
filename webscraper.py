@@ -53,6 +53,8 @@ class AirbnbScraper:
         """Set up the Chrome driver with appropriate options"""
         chrome_options = Options()
         chrome_options.add_argument("--headless")  # Run in headless mode
+        chrome_options.add_argument("--window-size=1920,1080")
+        chrome_options.add_argument("--start-maximized")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--start-maximized")
@@ -164,77 +166,46 @@ class AirbnbScraper:
     def get_amenities_text(self):
         """Get amenities text from modal or fall back to page text"""
         try:
-            print("\nTrying to access amenities...")
+            # print("Trying to access amenities...")
             
             # First make sure we're on the right part of the page
             self.driver.execute_script("window.scrollBy(0, 500);")
             # time.sleep(1)
             
-            # Try multiple selectors for the button
-            selectors = [
-                '//*[@id="site-content"]/div/div[1]/div[3]/div/div[1]/div/div[7]/div/div[2]/section/div[3]/button',  # Original XPath
-                "//button[contains(., 'Show all amenities')]",  # Text content
-                "//button[contains(@aria-label, 'amenities')]",  # Aria label
-                "//div[contains(@data-section-id, 'AMENITIES')]//button",  # Section + button
-                "//button[.//span[contains(text(), 'Show all')]]"  # Nested span with text
-            ]
-            
-            show_all_button = None
-            for selector in selectors:
-                # print(f"Trying selector: {selector}")
-                try:
-                    show_all_button = WebDriverWait(self.driver, 3).until(
-                        EC.presence_of_element_located((By.XPATH, selector))
-                    )
-                    if show_all_button:
-                        print(f"Found button using selector: {selector}")
-                        break
-                except:
-                    continue
+            # Try to find the Show all button with the first selector
+            show_all_button = WebDriverWait(self.driver, 5).until(
+                EC.presence_of_element_located((
+                    By.XPATH,
+                    '//*[@id="site-content"]/div/div[1]/div[3]/div/div[1]/div/div[7]/div/div[2]/section/div[3]/button'
+                ))
+            )
             
             if not show_all_button:
-                raise Exception("Could not find 'Show all amenities' button with any selector")
+                raise Exception("Could not find 'Show all amenities' button")
             
-            print("Found button, scrolling to it...")
+            # print("Found button, scrolling to it...")
             self.scroll_to_element(show_all_button)
             # time.sleep(1)
             
-            print("Attempting to click button...")
+            # print("Attempting to click button...")
             try:
                 show_all_button.click()
             except:
                 self.driver.execute_script("arguments[0].click();", show_all_button)
             
-            print("Button clicked, waiting for modal...")
+            # print("Button clicked, waiting for modal...")
             # time.sleep(1.5)
             
-            # Try multiple selectors for the modal content
-            modal_selectors = [
-                '/html/body/div[9]/div/div/section/div/div/div[2]/div/div[3]/div/div/div/section/section',  # Original XPath
-                "div[role='dialog'] section",  # CSS selector
-                "//div[@role='dialog']//div[@role='group']",  # Role-based XPath
-                "//div[contains(@aria-label, 'amenities')]"  # Aria label
-            ]
-            
-            modal = None
-            for selector in modal_selectors:
-                # print(f"Trying modal selector: {selector}")
-                try:
-                    if selector.startswith("//"):
-                        modal = WebDriverWait(self.driver, 3).until(
-                            EC.presence_of_element_located((By.XPATH, selector))
-                        )
-                    else:
-                        modal = WebDriverWait(self.driver, 3).until(
-                            EC.presence_of_element_located((By.CSS_SELECTOR, selector))
-                        )
-                    if modal:
-                        print(f"Found modal using selector: {selector}")
-                        break
-                except:
-                    continue
-            
-            if not modal:
+            # Try to find the modal with the single CSS selector
+            try:
+                modal = WebDriverWait(self.driver, 3).until(
+                    EC.presence_of_element_located((
+                        By.CSS_SELECTOR,
+                        "div[role='dialog'] section"
+                    ))
+                )
+                # print("Found modal")
+            except:
                 print("Could not access modal, falling back to page text...")
                 # Get amenities section from the main page
                 amenities_section = WebDriverWait(self.driver, 3).until(
@@ -251,7 +222,7 @@ class AirbnbScraper:
             # If modal was found, use its text
             amenities_text = modal.text
             if amenities_text:
-                print(f"\nFound amenities text from modal")
+                # print(f"Found amenities text from modal")
                 # print(f"\nFound amenities text from modal: {amenities_text[:100]}...")
                 return amenities_text
             
@@ -271,50 +242,6 @@ class AirbnbScraper:
             except:
                 print("Could not get any amenities text")
                 return None
-
-    def check_historical_house(self, page_text):
-        """Check if the listing is a historical house using simple text matching"""
-        try:
-            # Get description directly from the element with updated XPath
-            description_element = WebDriverWait(self.driver, 3).until(
-                EC.presence_of_element_located((
-                    By.XPATH,
-                    '//*[@id="site-content"]/div/div[1]/div[3]/div/div[1]/div/div[5]/div/div[2]/div[1]'  # Updated XPath
-                ))
-            )
-            description_text = description_element.text
-            if description_text:
-                page_text = f"{page_text}\n{description_text}"
-                print("Added description text to analysis")
-
-        except Exception as e:
-            print(f"Warning: Could not access description: {str(e)}")
-            # Continue with existing page_text if we can't get the description
-            pass
-
-        historical_terms = [
-            'historic', 'historical', 'history'
-        ]
-        
-        # Convert to lowercase for case-insensitive matching
-        page_text_lower = page_text.lower()
-        
-        # Find all matches with some context
-        evidence = []
-        for term in historical_terms:
-            # Find the term in the text
-            index = page_text_lower.find(term)
-            if index != -1:
-                # Get some context around the match (100 chars before and after)
-                start = max(0, index - 100)
-                end = min(len(page_text), index + len(term) + 100)
-                context = page_text[start:end].strip()
-                evidence.append(context)
-        
-        return {
-            "is_historical": len(evidence) > 0,
-            "evidence": "; ".join(evidence) if evidence else "No historical evidence found"
-        }
 
     def extract_missing_details(self, full_content, missing_fields):
         """Use Groq to extract missing details from the full page content"""
@@ -461,7 +388,7 @@ class AirbnbScraper:
                     reformatted_data["Guest Favorite Status"]
                 ])
             
-            print(f"\nUpdated output files in {self.run_dir}")
+            # print(f"\nUpdated output files in {self.run_dir}")
             
         except Exception as e:
             print(f"Error updating output files: {str(e)}")
@@ -514,7 +441,7 @@ class AirbnbScraper:
                             print(f"Processing listing {index} of {len(grid_items)}")
                             print(f"{'='*50}")
                             
-                            print("\nClicking listing and waiting for new tab...")
+                            # print("\nClicking listing and waiting for new tab...")
                             try:
                                 item.click()
                             except Exception as e:
@@ -526,7 +453,7 @@ class AirbnbScraper:
                             WebDriverWait(self.driver, 5).until(lambda d: len(d.window_handles) > 1)
                             new_window = [window for window in self.driver.window_handles if window != original_window][0]
                             self.driver.switch_to.window(new_window)
-                            print("Successfully switched to new tab")
+                            # print("Successfully switched to new tab")
 
                             # Wait for page to load
                             time.sleep(2)  # Give the page time to load
@@ -571,9 +498,9 @@ class AirbnbScraper:
                                     check_out = datetime.strptime(check_out_date, '%m/%d/%Y')
                                     num_nights = str((check_out - check_in).days)
                                     
-                                    print(f"Found check-in date: {check_in_date}")
-                                    print(f"Found check-out date: {check_out_date}")
-                                    print(f"Calculated {num_nights} nights")
+                                    # print(f"Found check-in date: {check_in_date}")
+                                    # print(f"Found check-out date: {check_out_date}")
+                                    # print(f"Calculated {num_nights} nights")
                                     
                                     # Calculate price per night
                                     try:
@@ -620,7 +547,7 @@ class AirbnbScraper:
 
                             # Extract all details
                             details = {}
-                            print("\nExtracting listing details")
+                            # print("\nExtracting listing details")
                             # print("\nExtracting listing details:")
                             # print("-" * 30)
                             for key, xpath in xpaths.items():
@@ -667,22 +594,16 @@ class AirbnbScraper:
                                     By.XPATH,
                                     '//*[@id="site-content"]/div/div[1]'
                                 ).text
-                                
-                                # Check for historical house using simple text matching
-                                historical_analysis = self.check_historical_house(full_content)
-                                # print("\nHistorical analysis:", json.dumps(historical_analysis, indent=2))
 
                                 # Update listing_details with new information
                                 listing_details.update({
-                                    "is_guest_favorite": guest_favorite,
-                                    "is_historical": historical_analysis["is_historical"],
-                                    "historical_evidence": historical_analysis["evidence"]
+                                    "is_guest_favorite": guest_favorite
                                 })
 
                                 # Get amenities text
                                 amenities_text = self.get_amenities_text()
                                 if amenities_text:
-                                    print("\nAnalyzing amenities with text matching...")
+                                    print("Analyzing amenities with text matching...")
                                     amenities_analysis = self.check_amenities_with_text_matching(amenities_text)
                                     if amenities_analysis:
                                         listing_details["amenities_analysis"] = amenities_analysis
@@ -692,7 +613,7 @@ class AirbnbScraper:
                                 print(f"Error processing amenities: {str(e)}")
                                 listing_details["amenities_analysis"] = {}
                             
-                            print("\nProcessed listing details.")
+                            # print("\nProcessed listing details.")
                             # print("\nProcessed listing details:")
                             # print("-" * 30)
                             # print(json.dumps(listing_details, indent=2))
@@ -711,7 +632,7 @@ class AirbnbScraper:
                             self.update_output_files(listing_details)  # Update files in real-time
 
                             # After all processing is done, close current tab and switch back to grid
-                            print("\nClosing listing tab and returning to grid...")
+                            # print("\nClosing listing tab and returning to grid...")
                             self.driver.close()
                             self.driver.switch_to.window(original_window)
                             print("Successfully returned to grid view")
