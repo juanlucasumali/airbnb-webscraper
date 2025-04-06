@@ -310,40 +310,95 @@ class AirbnbScraper:
             print(f"Error extracting missing details: {str(e)}")
             return {}
 
-    def get_next_page_link(self):
-        """Find and return the next page link if available"""
+    def get_next_button(self):
+        """Find and return the Next button if it's not disabled"""
         try:
-            # Try to find the Next button specifically
-            next_button_xpath = '//*[@id="site-content"]/div/div[3]/div/div/div/nav/div/a[last()]'  # Last <a> tag in nav
-            
+            # First try to find a Next link
+            next_button = self.driver.find_element(By.CSS_SELECTOR, 'a[aria-label="Next"]')
+            return next_button
+        except:
             try:
-                next_button = WebDriverWait(self.driver, 5).until(
-                    EC.presence_of_element_located((By.XPATH, next_button_xpath))
-                )
+                # Then try to find a disabled Next button
+                next_button = self.driver.find_element(By.CSS_SELECTOR, 'button[aria-label="Next"][disabled]')
+                return None  # Return None if we found a disabled button
+            except:
+                return None  # Return None if we couldn't find any Next button
+    
+    def scrape_url(self, url):
+        """
+        Scrape Airbnb listings from all pages
+        Args:
+            url (str): Complete Airbnb search URL
+        """
+        try:
+            current_page = 1
+            all_listings = []
+            
+            # Add page parameter to URL if not present
+            if 'page=' not in url:
+                url = f"{url}&page=1" if '?' in url else f"{url}?page=1"
+            
+            while True:  # Continue until we can't find a next button
+                print(f"\n{'='*50}")
+                print(f"Processing page {current_page}")
+                print(f"{'='*50}")
                 
-                print("\nFound next button:", next_button.get_attribute('aria-label'))
+                if current_page == 1:
+                    # Load first page
+                    print("\nLoading URL:", url)
+                    self.driver.get(url)
                 
-                # Check if the button is disabled
-                aria_disabled = next_button.get_attribute('aria-disabled')
-                if aria_disabled == 'true':
-                    print("Next button is disabled, no more pages")
-                    return None
+                # Handle popups
+                self.handle_popups()
+                
+                # Scrape current page
+                initial_page_text, _, initial_listings = self.scrape_initial_page_text()
+                if not initial_page_text:
+                    print("Failed to load page")
+                    break
+                
+                print(f"\nProcessed {len(initial_listings)} listings from page {current_page}")
+                all_listings.extend(initial_listings)
+                
+                # Try to find and click next button
+                next_button = self.get_next_button()
+                if next_button is None:
+                    print("\nReached last page - no more active Next button")
+                    break
+                
+                try:
+                    # Scroll to the button to make sure it's clickable
+                    self.driver.execute_script("arguments[0].scrollIntoView(true);", next_button)
+                    time.sleep(1)  # Small wait after scroll
                     
-                # Make sure it's actually the "Next" button
-                if 'Next' in next_button.get_attribute('aria-label'):
-                    print("Found active Next button")
-                    return next_button
-                
-                print("Button found but it's not a Next button")
-                return None
-                
-            except Exception as e:
-                print(f"Could not find Next button: {str(e)}")
-                return None
-                
+                    # Get the href before clicking
+                    next_url = next_button.get_attribute('href')
+                    
+                    # Try to click the button
+                    try:
+                        next_button.click()
+                    except:
+                        # If direct click fails, try JavaScript click
+                        self.driver.execute_script("arguments[0].click();", next_button)
+                    
+                    # If click seems to fail, try loading the URL directly
+                    if next_url:
+                        self.driver.get(next_url)
+                    
+                    current_page += 1
+                    print(f"\nMoving to page {current_page}...")
+                    time.sleep(2)  # Wait for page load
+                    
+                except Exception as e:
+                    print(f"Error navigating to next page: {str(e)}")
+                    break
+            
+            print(f"\nFinished scraping {current_page} pages, found {len(all_listings)} total listings")
+            return all_listings
+            
         except Exception as e:
-            print(f"Error in get_next_page_link: {str(e)}")
-            return None
+            print(f"Error in scrape_url: {str(e)}")
+            return []
 
     def update_output_files(self, listing_details):
         """Update both JSON and CSV files with new listing data"""
@@ -414,37 +469,6 @@ class AirbnbScraper:
         except Exception as e:
             print(f"Error updating output files: {str(e)}")
 
-    def scrape_url(self, url):
-        """
-        Scrape Airbnb listings from the first page
-        Args:
-            url (str): Complete Airbnb search URL
-        """
-        try:
-            # Add page parameter to URL if not present
-            if 'page=' not in url:
-                url = f"{url}&page=1" if '?' in url else f"{url}?page=1"
-            
-            # Load first page
-            print("\nLoading URL:", url)
-            self.driver.get(url)
-            
-            # Handle popups
-            self.handle_popups()
-            
-            # Scrape initial page text and get listings
-            initial_page_text, _, initial_listings = self.scrape_initial_page_text()
-            if not initial_page_text:
-                print("Failed to load initial page")
-                return []
-            
-            print(f"\nProcessed {len(initial_listings)} listings from first page")
-            return initial_listings
-            
-        except Exception as e:
-            print(f"Error in scrape_url: {str(e)}")
-            return []
-    
     def _calculate_price_per_night(self, details):
         """Helper method to calculate price per night"""
         try:
@@ -797,7 +821,7 @@ class AirbnbScraper:
                         "nights": num_nights if 'num_nights' in locals() else 2
                     }
                     
-                    print(f"\nExtracted listing details: {listing_details}")
+                    # print(f"\nExtracted listing details: {listing_details}")
                     listings.append(listing_details)
                     
                     # Update output files immediately with initial data
