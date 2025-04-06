@@ -23,31 +23,12 @@ class AirbnbScraper:
         self.results = []
         self.setup_groq()
         
-        # Create run-specific directory
-        self.run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.run_dir = os.path.join("runs", self.run_timestamp)
-        if not os.path.exists(self.run_dir):
-            os.makedirs(self.run_dir)
-        
-        # Initialize output files
-        self.json_file = os.path.join(self.run_dir, "listings.json")
-        self.csv_file = os.path.join(self.run_dir, "listings.csv")
-        
-        # Create empty JSON file
-        with open(self.json_file, 'w') as f:
-            json.dump([], f)
-        
-        # Create CSV with headers
-        headers = [
-            "Link", "Name", "Bedrooms", "Beds", "Bathrooms", "Guest Limit", 
-            "Stars", "Price/Night in May", "AirBnB Location Rating", "Source", 
-            "Amenities", "TV", "Pool", "Jacuzzi", "Historical House", 
-            "Billiards Table", "Large Yard", "Balcony", "Laundry", "Home Gym",
-            "Guest Favorite Status"
-        ]
-        with open(self.csv_file, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow(headers)
+        # Initialize folder paths but don't create them yet
+        # They will be created after we get the search details
+        self.queries_dir = "queries"
+        self.query_dir = None
+        self.json_file = None
+        self.csv_file = None
         
     def setup_driver(self):
         """Set up the Chrome driver with appropriate options"""
@@ -414,6 +395,75 @@ class AirbnbScraper:
             print(f"Error processing listing page: {str(e)}")
             return None
 
+    def extract_search_params(self, text):
+        """Extract search parameters from the initial page text to create folder name"""
+        try:
+            # Extract location
+            location_match = re.search(r'Location\s+([^Check]+)', text)
+            location = location_match.group(1).strip() if location_match else ""
+            
+            # Extract dates
+            dates_match = re.search(r'Check\s+(?:in|out)\s+([A-Za-z]+\s+\d+\s*[–-]\s*\d+)', text)
+            dates = dates_match.group(1).strip() if dates_match else ""
+            
+            # Extract guests
+            guests_match = re.search(r'(\d+)\s+guests?', text)
+            guests = guests_match.group(1) if guests_match else ""
+            
+            # Create folder name
+            folder_name = f"{location}_{dates.replace(' ', '')}_{guests}guests"
+            
+            # Sanitize folder name
+            folder_name = re.sub(r'[^\w\-\.]', '_', folder_name)  # Replace non-word chars with underscore
+            folder_name = re.sub(r'_+', '_', folder_name)  # Replace multiple underscores with single
+            folder_name = folder_name.strip('_')  # Remove leading/trailing underscores
+            
+            return folder_name
+            
+        except Exception as e:
+            print(f"Error extracting search parameters: {str(e)}")
+            # Fallback to timestamp if we can't extract params
+            return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    def setup_output_files(self, folder_name):
+        """Setup output files in the query-specific directory"""
+        try:
+            # Create queries directory if it doesn't exist
+            if not os.path.exists(self.queries_dir):
+                os.makedirs(self.queries_dir)
+            
+            # Set up query-specific directory
+            self.query_dir = os.path.join(self.queries_dir, folder_name)
+            if not os.path.exists(self.query_dir):
+                os.makedirs(self.query_dir)
+            
+            # Set up file paths
+            self.json_file = os.path.join(self.query_dir, "listings.json")
+            self.csv_file = os.path.join(self.query_dir, "listings.csv")
+            
+            # If files don't exist, create them with headers
+            if not os.path.exists(self.json_file):
+                with open(self.json_file, 'w') as f:
+                    json.dump([], f)
+            
+            if not os.path.exists(self.csv_file):
+                headers = [
+                    "Link", "Name", "Bedrooms", "Beds", "Bathrooms", "Guest Limit", 
+                    "Stars", "Price/Night in May", "AirBnB Location Rating", "Source", 
+                    "Amenities", "TV", "Pool", "Jacuzzi", "Historical House", 
+                    "Billiards Table", "Large Yard", "Balcony", "Laundry", "Home Gym",
+                    "Guest Favorite Status"
+                ]
+                with open(self.csv_file, 'w', newline='', encoding='utf-8') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(headers)
+            
+            print(f"\nUsing query directory: {self.query_dir}")
+            
+        except Exception as e:
+            print(f"Error setting up output files: {str(e)}")
+            raise
+
     def scrape_url(self, url):
         """
         Scrape Airbnb listings from all pages
@@ -428,13 +478,29 @@ class AirbnbScraper:
             if 'page=' not in url:
                 url = f"{url}&page=1" if '?' in url else f"{url}?page=1"
             
+            # First load the page to get search parameters
+            print("\nLoading URL:", url)
+            self.driver.get(url)
+            self.handle_popups()
+            
+            # Get initial page text and set up directories
+            initial_page_text, _, _ = self.scrape_initial_page_text()
+            if not initial_page_text:
+                print("Failed to load initial page")
+                return []
+            
+            # Setup output files with folder name from search parameters
+            folder_name = self.extract_search_params(initial_page_text)
+            self.setup_output_files(folder_name)
+            
+            # Now start the pagination loop
             while True:  # Continue until we can't find a next button
                 print(f"\n{'='*50}")
                 print(f"Processing page {current_page}")
                 print(f"{'='*50}")
                 
                 if current_page == 1:
-                    # Load first page
+                    # Load next page
                     print("\nLoading URL:", url)
                     self.driver.get(url)
                 
@@ -442,8 +508,8 @@ class AirbnbScraper:
                 self.handle_popups()
                 
                 # Scrape current page
-                initial_page_text, _, initial_listings = self.scrape_initial_page_text()
-                if not initial_page_text:
+                _, _, initial_listings = self.scrape_initial_page_text()
+                if not initial_listings:
                     print("Failed to load page")
                     break
                 
@@ -482,7 +548,7 @@ class AirbnbScraper:
                 except Exception as e:
                     print(f"Error navigating to next page: {str(e)}")
                     break
-                    
+            
             print(f"\nFinished scraping {current_page} pages, found {len(all_listings)} total listings")
             
             # Process each listing's page
@@ -494,7 +560,7 @@ class AirbnbScraper:
                 self.process_listing_page(listing)
             
             return all_listings
-                
+            
         except Exception as e:
             print(f"Error in scrape_url: {str(e)}")
             return []
@@ -502,6 +568,12 @@ class AirbnbScraper:
     def update_output_files(self, listing_details):
         """Update both JSON and CSV files with new listing data"""
         try:
+            # Helper function to handle boolean values
+            def get_boolean_value(value):
+                if value is None:
+                    return ""  # Return empty if not checked
+                return "TRUE" if value else "FALSE"  # Return TRUE/FALSE if we know the value
+            
             # Prepare the reformatted data
             reformatted_data = {
                 "Link": listing_details.get("url", ""),
@@ -515,16 +587,16 @@ class AirbnbScraper:
                 "AirBnB Location Rating": listing_details.get("location_rating", ""),
                 "Source": "Airbnb",
                 "Amenities": "",  # Blank as requested
-                "TV": "TRUE" if listing_details.get("amenities_analysis", {}).get("TV", False) else "FALSE",
-                "Pool": "TRUE" if listing_details.get("amenities_analysis", {}).get("Pool", False) else "FALSE",
-                "Jacuzzi": "TRUE" if listing_details.get("amenities_analysis", {}).get("Jacuzzi", False) else "FALSE",
-                "Historical House": "TRUE" if listing_details.get("is_historical", False) else "FALSE",
-                "Billiards Table": "TRUE" if listing_details.get("amenities_analysis", {}).get("Billiards/Pool Table", False) else "FALSE",
-                "Large Yard": "TRUE" if listing_details.get("amenities_analysis", {}).get("Large Yard", False) else "FALSE",
-                "Balcony": "TRUE" if listing_details.get("amenities_analysis", {}).get("Balcony", False) else "FALSE",
-                "Laundry": "TRUE" if listing_details.get("amenities_analysis", {}).get("Laundry", False) else "FALSE",
-                "Home Gym": "TRUE" if listing_details.get("amenities_analysis", {}).get("Home Gym", False) else "FALSE",
-                "Guest Favorite Status": "TRUE" if listing_details.get("is_guest_favorite", False) else "FALSE"
+                "TV": self._get_amenity_value(listing_details, "TV"),
+                "Pool": self._get_amenity_value(listing_details, "Pool"),
+                "Jacuzzi": self._get_amenity_value(listing_details, "Jacuzzi"),
+                "Historical House": get_boolean_value(listing_details.get("is_historical")),
+                "Billiards Table": self._get_amenity_value(listing_details, "Billiards/Pool Table"),
+                "Large Yard": self._get_amenity_value(listing_details, "Large Yard"),
+                "Balcony": self._get_amenity_value(listing_details, "Balcony"),
+                "Laundry": self._get_amenity_value(listing_details, "Laundry"),
+                "Home Gym": self._get_amenity_value(listing_details, "Home Gym"),
+                "Guest Favorite Status": get_boolean_value(listing_details.get("is_guest_favorite"))
             }
             
             # Update JSON file
@@ -589,7 +661,16 @@ class AirbnbScraper:
             
         except Exception as e:
             print(f"Error updating output files: {str(e)}")
-    
+
+    def _get_amenity_value(self, listing_details, amenity_key):
+        """Helper method to get amenity value with proper blank handling"""
+        amenities_analysis = listing_details.get("amenities_analysis")
+        if not amenities_analysis:
+            return ""  # Return empty if we haven't checked amenities
+        if amenity_key in amenities_analysis:
+            return "TRUE" if amenities_analysis[amenity_key] else "FALSE"
+        return ""  # Return empty if this specific amenity wasn't checked
+
     def _calculate_price_per_night(self, details):
         """Helper method to calculate price per night"""
         try:
@@ -644,7 +725,7 @@ class AirbnbScraper:
     
     def save_results(self, filename=None):
         """This method is now deprecated since we're saving in real-time"""
-        print("Results are being saved in real-time to:", self.run_dir)
+        print("Results are being saved in real-time to:", self.query_dir)
         print(f"JSON file: {self.json_file}")
         print(f"CSV file: {self.csv_file}")
     
@@ -912,29 +993,7 @@ class AirbnbScraper:
                         "nights": num_nights if 'num_nights' in locals() else 2
                     }
                     
-                    # print(f"\nExtracted listing details: {listing_details}")
                     listings.append(listing_details)
-                    
-                    # Update output files immediately with initial data
-                    self.update_output_files({
-                        "url": listing_details["url"],
-                        "name": listing_details["name"],
-                        "price_per_night": listing_details["price_per_night"],
-                        "total_price": listing_details["total_price"],
-                        "location": listing_details["location"],
-                        "stars": listing_details["rating"],
-                        "review_count": listing_details["review_count"],
-                        "location_rating": "N/A",
-                        "bedrooms": "N/A",
-                        "beds": "N/A",
-                        "bathrooms": "N/A",
-                        "guest_limit": "N/A",
-                        "amenities_analysis": {},
-                        "is_historical": False,
-                        "is_guest_favorite": listing_details["is_guest_favorite"],
-                        "is_top_guest_favorite": listing_details["is_top_guest_favorite"],
-                        "nights": listing_details["nights"]
-                    })
                     
                 except Exception as e:
                     print(f"Error processing individual listing: {str(e)}")
