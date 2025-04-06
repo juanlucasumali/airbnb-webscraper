@@ -57,10 +57,31 @@ class AirbnbScraper:
         chrome_options.add_argument("--start-maximized")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--start-maximized")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--disable-extensions")
+        chrome_options.add_argument("--disable-infobars")
+        chrome_options.add_argument("--disable-notifications")
+        chrome_options.add_argument("--disable-popup-blocking")
+        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+        
+        # Add user agent to mimic a real browser
+        chrome_options.add_argument("user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        
+        # Add experimental options to prevent detection
+        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        chrome_options.add_experimental_option("useAutomationExtension", False)
         
         service = Service(ChromeDriverManager().install())
         self.driver = webdriver.Chrome(service=service, options=chrome_options)
+        
+        # Set additional properties to prevent detection
+        self.driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+            "source": """
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                })
+            """
+        })
         
     def setup_groq(self):
         """Set up the Groq client"""
@@ -393,110 +414,36 @@ class AirbnbScraper:
         except Exception as e:
             print(f"Error updating output files: {str(e)}")
 
-    def scrape_url(self, url, num_pages=5):
+    def scrape_url(self, url):
         """
-        Scrape Airbnb listings from a direct URL with pagination
+        Scrape Airbnb listings from the first page
         Args:
             url (str): Complete Airbnb search URL
-            num_pages (int): Number of pages to scrape
         """
         try:
-            current_page = 1
-            all_listings = []
-            
             # Add page parameter to URL if not present
             if 'page=' not in url:
                 url = f"{url}&page=1" if '?' in url else f"{url}?page=1"
             
-            while current_page <= num_pages:
-                print(f"\n{'='*50}")
-                print(f"Processing page {current_page} of {num_pages}")
-                print(f"{'='*50}")
-                
-                # Load the page
-                print("\nLoading URL:", url)
-                self.driver.get(url)
-                
-                # Handle popups
-                self.handle_popups()
-                
-                try:
-                    # Process grid items
-                    print("Waiting for listings grid to load...")
-                    grid_items = WebDriverWait(self.driver, 5).until(
-                        EC.presence_of_all_elements_located((
-                            By.XPATH, 
-                            '//*[@id="site-content"]/div/div[2]/div/div/div/div/div/div'
-                        ))
-                    )
-                    print(f"Found {len(grid_items)} listings to process")
-                    
-                    original_window = self.driver.current_window_handle
-                    
-                    # Iterate through each grid item
-                    for index, item in enumerate(grid_items, 1):
-                        try:
-                            print(f"\n{'='*50}")
-                            print(f"Processing listing {index} of {len(grid_items)}")
-                            print(f"{'='*50}")
-                            
-                            try:
-                                item.click()
-                            except Exception as e:
-                                print(f"Error clicking item: {str(e)}")
-                                # Try using JavaScript click as fallback
-                                self.driver.execute_script("arguments[0].click();", item)
-                            
-                            # Switch to new tab
-                            WebDriverWait(self.driver, 5).until(lambda d: len(d.window_handles) > 1)
-                            new_window = [window for window in self.driver.window_handles if window != original_window][0]
-                            self.driver.switch_to.window(new_window)
-                            
-                            # Wait for page to load
-                            time.sleep(2)
-                            
-                            # Scrape and log all text from the page
-                            self.scrape_page_text()
-                            
-                            # Close current tab and switch back to grid
-                            self.driver.close()
-                            self.driver.switch_to.window(original_window)
-                            print("Successfully returned to grid view")
-                        
-                        except Exception as e:
-                            print(f"\nError processing listing {index}: {str(e)}")
-                            # Make sure we're back on the original window
-                            if len(self.driver.window_handles) > 1 and self.driver.current_window_handle != original_window:
-                                print("Closing error tab and switching back to main window...")
-                                self.driver.close()
-                                self.driver.switch_to.window(original_window)
-                    
-                    # After processing all items in the current page
-                    if current_page < num_pages:
-                        # Find and click next page link
-                        next_page = self.get_next_page_link()
-                        if next_page:
-                            url = next_page.get_attribute('href')
-                            current_page += 1
-                            print(f"\nMoving to page {current_page}...")
-                            continue
-                        else:
-                            print("\nNo more pages available, ending scrape")
-                            break
-                    
-                except Exception as e:
-                    print(f"Error processing page {current_page}: {str(e)}")
-                    break
-                    
-                except TimeoutException:
-                    print("Timeout waiting for listings to load")
-                except Exception as e:
-                    print(f"Error processing listings: {str(e)}")
-                
+            # Load first page
+            print("\nLoading URL:", url)
+            self.driver.get(url)
+            
+            # Handle popups
+            self.handle_popups()
+            
+            # Scrape initial page text and get listings
+            initial_page_text, _, initial_listings = self.scrape_initial_page_text()
+            if not initial_page_text:
+                print("Failed to load initial page")
+                return []
+            
+            print(f"\nProcessed {len(initial_listings)} listings from first page")
+            return initial_listings
+            
         except Exception as e:
             print(f"Error in scrape_url: {str(e)}")
-        
-        return all_listings
+            return []
     
     def _calculate_price_per_night(self, details):
         """Helper method to calculate price per night"""
@@ -713,13 +660,235 @@ class AirbnbScraper:
             print("\n" + "="*50)
             print("PAGE TEXT CONTENT:")
             print("="*50)
-            print(all_text)
+            # print(all_text)
             print("="*50 + "\n")
             
             return all_text
             
         except Exception as e:
             print(f"Error scraping page text: {str(e)}")
+            return None
+
+    def extract_price_per_night(self, page_text):
+        """
+        Extract price per night from page text using regex pattern matching
+        Args:
+            page_text (str): The full text content of the page
+        Returns:
+            str: The price per night as a string, or "N/A" if not found
+        """
+        try:
+            # First try the price breakdown pattern
+            breakdown_pattern = r"Show price breakdown \$([\d,]+) for (\d+) nights"
+            breakdown_match = re.search(breakdown_pattern, page_text)
+            
+            if breakdown_match:
+                total_price = breakdown_match.group(1).replace(',', '')  # Remove commas
+                num_nights = int(breakdown_match.group(2))
+                
+                # Calculate price per night
+                price_per_night = int(total_price) // num_nights
+                
+                print(f"\nFound price breakdown: ${total_price} for {num_nights} nights")
+                print(f"Calculated price per night: ${price_per_night}")
+                
+                return str(price_per_night)
+            
+            # Fallback: Try to find total price pattern like "Location $2,177 total"
+            total_price_pattern = r"\$([\d,]+)\s+total"
+            total_match = re.search(total_price_pattern, page_text)
+            
+            if total_match:
+                total_price = total_match.group(1).replace(',', '')  # Remove commas
+                print(f"\nFound total price: ${total_price}")
+                
+                # If we have the number of nights from the initial page, use it
+                if hasattr(self, 'num_nights') and self.num_nights:
+                    price_per_night = int(total_price) // self.num_nights
+                    print(f"Using {self.num_nights} nights from initial page")
+                    print(f"Calculated price per night: ${price_per_night}")
+                    return str(price_per_night)
+                else:
+                    print("No number of nights found, returning total price")
+                    return total_price
+            
+            print("Could not find any price pattern in page text")
+            return "N/A"
+                
+        except Exception as e:
+            print(f"Error extracting price per night: {str(e)}")
+            return "N/A"
+
+    def extract_max_pages(self, text):
+        """Extract the maximum number of pages from the initial search text"""
+        try:
+            # Look for numbered page buttons like "1 2 3 4 5 6"
+            page_numbers = re.findall(r'\b\d+\b(?=\s+(?:\d+\s+)*(?:Centered|Google|Map))', text)
+            if page_numbers:
+                return max(map(int, page_numbers))
+            return 1
+        except Exception as e:
+            print(f"Error extracting max pages: {str(e)}")
+            return 1
+
+    def extract_initial_listings(self, text):
+        """Extract initial listing details from search page text and grid items"""
+        try:
+            # Wait for and get grid items
+            grid_items = WebDriverWait(self.driver, 10).until(
+                EC.presence_of_all_elements_located((
+                    By.XPATH, 
+                    '//*[@id="site-content"]/div/div[2]/div/div/div/div/div/div'
+                ))
+            )
+            print(f"\nFound {len(grid_items)} grid items to process")
+            
+            listings = []
+            for item in grid_items:
+                try:
+                    # Get name using the listing-card-name data-testid
+                    name_element = item.find_element(By.CSS_SELECTOR, 'span[data-testid="listing-card-name"]')
+                    name = name_element.text if name_element else "N/A"
+                    
+                    # Get link from the parent anchor tag that wraps the entire card
+                    link_element = item.find_element(By.CSS_SELECTOR, 'a[href*="/rooms/"]')
+                    link = link_element.get_attribute('href') if link_element else "N/A"
+                    
+                    # Get the text content of this specific grid item
+                    item_text = item.text
+                    
+                    # Extract price - look for price breakdown pattern
+                    price_match = re.search(r'\$(\d+(?:,\d+)?)\s+for\s+(\d+)\s+nights', item_text)
+                    if price_match:
+                        total_price = int(price_match.group(1).replace(',', ''))
+                        num_nights = int(price_match.group(2))
+                        price_per_night = total_price // num_nights
+                    else:
+                        # Fallback to just finding the last price mentioned
+                        prices = re.findall(r'\$(\d+(?:,\d+)?)', item_text)
+                        total_price = int(prices[-1].replace(',', '')) if prices else 0
+                        price_per_night = total_price // 2  # Assume 2 nights if not specified
+                    
+                    # Extract rating
+                    rating_match = re.search(r'([\d.]+)\s+out of 5\s+average rating,\s+(\d+)\s+reviews', item_text)
+                    if not rating_match:
+                        rating_match = re.search(r'([\d.]+)\s+\((\d+)\)', item_text)
+                    
+                    rating = rating_match.group(1) if rating_match else "N/A"
+                    review_count = rating_match.group(2) if rating_match else "0"
+                    
+                    # Check for guest favorite status
+                    is_guest_favorite = "Guest favorite" in item_text
+                    is_top_guest_favorite = "Top guest favorite" in item_text
+                    
+                    # Get location from the text before the property name
+                    location = item_text.split(name)[0].replace("Home in", "").strip() if name != "N/A" else "N/A"
+                    
+                    listing_details = {
+                        "name": name,
+                        "url": link,
+                        "location": location,
+                        "price_per_night": str(price_per_night),
+                        "total_price": str(total_price),
+                        "rating": rating,
+                        "review_count": review_count,
+                        "is_guest_favorite": is_top_guest_favorite or is_guest_favorite,
+                        "is_top_guest_favorite": is_top_guest_favorite,
+                        "nights": num_nights if 'num_nights' in locals() else 2
+                    }
+                    
+                    print(f"\nExtracted listing details: {listing_details}")
+                    listings.append(listing_details)
+                    
+                    # Update output files immediately with initial data
+                    self.update_output_files({
+                        "url": listing_details["url"],
+                        "name": listing_details["name"],
+                        "price_per_night": listing_details["price_per_night"],
+                        "total_price": listing_details["total_price"],
+                        "location": listing_details["location"],
+                        "stars": listing_details["rating"],
+                        "review_count": listing_details["review_count"],
+                        "location_rating": "N/A",
+                        "bedrooms": "N/A",
+                        "beds": "N/A",
+                        "bathrooms": "N/A",
+                        "guest_limit": "N/A",
+                        "amenities_analysis": {},
+                        "is_historical": False,
+                        "is_guest_favorite": listing_details["is_guest_favorite"],
+                        "is_top_guest_favorite": listing_details["is_top_guest_favorite"],
+                        "nights": listing_details["nights"]
+                    })
+                    
+                except Exception as e:
+                    print(f"Error processing individual listing: {str(e)}")
+                    continue
+            
+            return listings
+            
+        except Exception as e:
+            print(f"Error extracting initial listings: {str(e)}")
+            return []
+
+    def scrape_initial_page_text(self):
+        """Scrape and log all text from the initial search results page"""
+        try:
+            # Wait for the page to load by checking for a common element
+            WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((
+                    By.XPATH,
+                    '//*[@id="site-content"]/div/div[2]/div/div/div/div/div/div'
+                ))
+            )
+            
+            # Get the page source
+            page_source = self.driver.page_source
+            
+            # Parse with BeautifulSoup
+            soup = BeautifulSoup(page_source, 'html.parser')
+            
+            # Get all text, removing extra whitespace
+            all_text = ' '.join(soup.stripped_strings)
+            
+            # Extract max pages and initial listings
+            max_pages = self.extract_max_pages(all_text)
+            initial_listings = self.extract_initial_listings(all_text)
+            
+            print(f"\nFound {len(initial_listings)} listings on initial page")
+            print(f"Maximum pages: {max_pages}")
+            
+            return all_text, max_pages, initial_listings
+            
+        except Exception as e:
+            print(f"Error scraping initial page text: {str(e)}")
+            return None, 1, []
+
+    def extract_nights_from_text(self, text):
+        """
+        Extract the number of nights from the initial page text
+        Args:
+            text (str): The text content from the initial page
+        Returns:
+            int: Number of nights, or None if not found
+        """
+        try:
+            # Pattern to match dates like "Check out May 23 – 25"
+            pattern = r"Check out.*?(\d+)\s*[–-]\s*(\d+)"
+            match = re.search(pattern, text)
+            
+            if match:
+                start_day = int(match.group(1))
+                end_day = int(match.group(2))
+                nights = end_day - start_day
+                print(f"Found {nights} nights from dates {start_day} to {end_day}")
+                return nights
+            else:
+                print("Could not find date range in text")
+                return None
+                
+        except Exception as e:
+            print(f"Error extracting nights from text: {str(e)}")
             return None
 
 def main():
@@ -729,10 +898,9 @@ def main():
     try:
         # Get the Airbnb search URL from user
         url = input("Enter the complete Airbnb search URL: ")
-        num_pages = int(input("Enter number of pages to scrape (default 5): ") or 5)
         
         print(f"\nScraping Airbnb listings...")
-        scraper.scrape_url(url, num_pages=num_pages)
+        scraper.scrape_url(url)
         
         # Save results
         scraper.save_results()
