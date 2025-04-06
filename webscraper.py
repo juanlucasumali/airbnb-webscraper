@@ -344,6 +344,63 @@ class AirbnbScraper:
             
             # Extract specific details
             listing_details = self.extract_listing_details(full_text)
+                        
+            # Get amenities text first
+            print("\n" + "="*50)
+            print("AMENITIES:")
+            print("="*50)
+            
+            try:
+                # Find the Show all amenities button by text pattern
+                show_all_button = WebDriverWait(self.driver, 5).until(
+                    EC.presence_of_element_located((
+                        By.XPATH,
+                        "//button[contains(text(), 'Show all') and contains(text(), 'amenities')]"
+                    ))
+                )
+                
+                if show_all_button:
+                    # Scroll to the button and click it
+                    self.scroll_to_element(show_all_button)
+                    time.sleep(1)
+                    
+                    try:
+                        show_all_button.click()
+                    except:
+                        self.driver.execute_script("arguments[0].click();", show_all_button)
+                    
+                    time.sleep(1)
+                    
+                    # Try to find the modal
+                    try:
+                        modal = WebDriverWait(self.driver, 3).until(
+                            EC.presence_of_element_located((
+                                By.CSS_SELECTOR,
+                                "div[role='dialog'] section"
+                            ))
+                        )
+                        amenities_text = modal.text
+                        print(amenities_text)
+                    except:
+                        print("Could not access modal, getting amenities from page...")
+                        amenities_section = WebDriverWait(self.driver, 3).until(
+                            EC.presence_of_element_located((
+                                By.CSS_SELECTOR,
+                                "div[data-section-id='AMENITIES_DEFAULT']"
+                            ))
+                        )
+                        amenities_text = amenities_section.text
+                        print(amenities_text)
+                
+            except Exception as e:
+                print(f"Error accessing amenities: {str(e)}")
+                amenities_text = ""
+            
+            print("="*50)
+            
+            # Add amenities analysis to the listing details
+            if amenities_text:
+                listing_details["amenities_analysis"] = self.check_amenities_with_text_matching(amenities_text)
             
             # Update the listing with new details
             listing.update(listing_details)
@@ -425,7 +482,7 @@ class AirbnbScraper:
                 except Exception as e:
                     print(f"Error navigating to next page: {str(e)}")
                     break
-            
+                    
             print(f"\nFinished scraping {current_page} pages, found {len(all_listings)} total listings")
             
             # Process each listing's page
@@ -437,7 +494,7 @@ class AirbnbScraper:
                 self.process_listing_page(listing)
             
             return all_listings
-            
+                
         except Exception as e:
             print(f"Error in scrape_url: {str(e)}")
             return []
@@ -532,7 +589,7 @@ class AirbnbScraper:
             
         except Exception as e:
             print(f"Error updating output files: {str(e)}")
-
+    
     def _calculate_price_per_night(self, details):
         """Helper method to calculate price per night"""
         try:
@@ -660,75 +717,45 @@ class AirbnbScraper:
             return "N/A"
 
     def check_amenities_with_text_matching(self, amenities_text):
-        """Check amenities using text matching with comprehensive variations"""
-        amenity_variations = {
-            "TV": [
-                "tv", "television", "smart tv", "cable tv", "hdtv", "roku", 
-                "netflix", "streaming", "apple tv", "flat screen"
-            ],
-            "Pool": [
-                "pool", "swimming pool", "outdoor pool", "indoor pool", 
-                "heated pool", "lap pool", "plunge pool"
-            ],
-            "Jacuzzi": [
-                "jacuzzi", "hot tub", "whirlpool", "jetted tub", 
-                "soaking tub", "spa tub"
-            ],
-            "Billiards/Pool Table": [
-                "pool table", "billiards", "billiard table", "game table", 
-                "gaming table", "pool cue"
-            ],
-            "Large Yard": [
-                "yard", "garden", "backyard", "outdoor space", "patio", 
-                "lawn", "courtyard", "grounds"
-            ],
-            "Balcony": [
-                "balcony", "deck", "terrace", "porch", "veranda", 
-                "outdoor deck", "private balcony"
-            ],
-            "Laundry": [
-                "laundry", "washer", "dryer", "washing machine", "laundromat",
-                "clothes washer", "clothes dryer", "washer/dryer"
-            ],
-            "Home Gym": [
-                "gym", "fitness", "exercise", "workout", "weight", 
-                "treadmill", "exercise equipment", "fitness room"
-            ]
-        }
-        
+        """Check amenities using exact text matching"""
         # Convert amenities text to lowercase for case-insensitive matching
         amenities_text_lower = amenities_text.lower()
         
         # Initialize results dictionary
         results = {
-            amenity: False for amenity in amenity_variations.keys()
+            "Pool": False,
+            "Jacuzzi": False,
+            "Home Gym": False
         }
         
-        # Store evidence of matches
-        evidence = {}
-        
-        # Check each amenity
-        for amenity, variations in amenity_variations.items():
-            matches = []
-            for variation in variations:
-                if variation in amenities_text_lower:
-                    matches.append(variation)
+        # Check for pool (excluding pool table)
+        pool_index = amenities_text_lower.find("pool")
+        while pool_index != -1:
+            # Get some context around the match
+            start = max(0, pool_index - 10)
+            end = min(len(amenities_text_lower), pool_index + 14)  # pool + table + some extra
+            context = amenities_text_lower[start:end]
             
-            if matches:
-                results[amenity] = True
-                # Get some context around the first match
-                first_match = matches[0]
-                index = amenities_text_lower.find(first_match)
-                start = max(0, index - 50)
-                end = min(len(amenities_text), index + len(first_match) + 50)
-                context = amenities_text[start:end].strip()
-                evidence[amenity] = {
-                    "matched_terms": matches,
-                    "context": context
-                }
+            # If "pool table" is not in the context, count it as a pool
+            if "pool table" not in context and "billiard" not in context:
+                results["Pool"] = True
+                break
+            
+            # Look for next occurrence
+            pool_index = amenities_text_lower.find("pool", pool_index + 1)
         
-        # Add evidence to results
-        # results["_evidence"] = evidence
+        # Check for exact "jacuzzi"
+        if "jacuzzi" in amenities_text_lower:
+            results["Jacuzzi"] = True
+        
+        # Check for exact "gym"
+        if "gym" in amenities_text_lower:
+            results["Home Gym"] = True
+        
+        print("\nAmenities found:")
+        print(f"Pool: {results['Pool']}")
+        print(f"Jacuzzi: {results['Jacuzzi']}")
+        print(f"Gym: {results['Home Gym']}")
         
         return results
 
@@ -799,7 +826,7 @@ class AirbnbScraper:
                 else:
                     print("No number of nights found, returning total price")
                     return total_price
-            
+
             print("Could not find any price pattern in page text")
             return "N/A"
                 
@@ -1005,8 +1032,8 @@ class AirbnbScraper:
                         
                         # Check which detail this is
                         if "guest" in item_text.lower():
-                            # Extract guest limit (e.g., "8 guests")
-                            guest_num = re.search(r'(\d+)\s*guests?', item_text)
+                            # Extract guest limit, handling both "X guests" and "X+ guests" formats
+                            guest_num = re.search(r'(\d+)(?:\+)?\s*guests?', item_text)
                             if guest_num:
                                 details["guest_limit"] = guest_num.group(1)
                         elif "bedroom" in item_text.lower():
