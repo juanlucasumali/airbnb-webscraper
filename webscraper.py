@@ -57,10 +57,31 @@ class AirbnbScraper:
         chrome_options.add_argument("--start-maximized")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--start-maximized")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--disable-extensions")
+        chrome_options.add_argument("--disable-infobars")
+        chrome_options.add_argument("--disable-notifications")
+        chrome_options.add_argument("--disable-popup-blocking")
+        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+        
+        # Add user agent to mimic a real browser
+        chrome_options.add_argument("user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        
+        # Add experimental options to prevent detection
+        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        chrome_options.add_experimental_option("useAutomationExtension", False)
         
         service = Service(ChromeDriverManager().install())
         self.driver = webdriver.Chrome(service=service, options=chrome_options)
+        
+        # Set additional properties to prevent detection
+        self.driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+            "source": """
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                })
+            """
+        })
         
     def setup_groq(self):
         """Set up the Groq client"""
@@ -289,40 +310,194 @@ class AirbnbScraper:
             print(f"Error extracting missing details: {str(e)}")
             return {}
 
-    def get_next_page_link(self):
-        """Find and return the next page link if available"""
+    def get_next_button(self):
+        """Find and return the Next button if it's not disabled"""
         try:
-            # Try to find the Next button specifically
-            next_button_xpath = '//*[@id="site-content"]/div/div[3]/div/div/div/nav/div/a[last()]'  # Last <a> tag in nav
+            # First try to find a Next link
+            next_button = self.driver.find_element(By.CSS_SELECTOR, 'a[aria-label="Next"]')
+            return next_button
+        except:
+            try:
+                # Then try to find a disabled Next button
+                next_button = self.driver.find_element(By.CSS_SELECTOR, 'button[aria-label="Next"][disabled]')
+                return None  # Return None if we found a disabled button
+            except:
+                return None  # Return None if we couldn't find any Next button
+    
+    def process_listing_page(self, listing):
+        """Process an individual listing page and extract its full text"""
+        try:
+            print(f"\nProcessing listing: {listing['name']}")
+            print(f"URL: {listing['url']}")
+            
+            # Load the listing page
+            self.driver.get(listing['url'])
+            time.sleep(2)  # Wait for page load
+            
+            # Handle any popups
+            self.handle_popups()
+            
+            # Get the full page text
+            page_source = self.driver.page_source
+            soup = BeautifulSoup(page_source, 'html.parser')
+            full_text = ' '.join(soup.stripped_strings)
+            
+            # Extract specific details
+            listing_details = self.extract_listing_details(full_text)
+                        
+            # Get amenities text first
+            print("\n" + "="*50)
+            print("AMENITIES:")
+            print("="*50)
             
             try:
-                next_button = WebDriverWait(self.driver, 5).until(
-                    EC.presence_of_element_located((By.XPATH, next_button_xpath))
+                # Find the Show all amenities button by text pattern
+                show_all_button = WebDriverWait(self.driver, 5).until(
+                    EC.presence_of_element_located((
+                        By.XPATH,
+                        "//button[contains(text(), 'Show all') and contains(text(), 'amenities')]"
+                    ))
                 )
                 
-                print("\nFound next button:", next_button.get_attribute('aria-label'))
-                
-                # Check if the button is disabled
-                aria_disabled = next_button.get_attribute('aria-disabled')
-                if aria_disabled == 'true':
-                    print("Next button is disabled, no more pages")
-                    return None
+                if show_all_button:
+                    # Scroll to the button and click it
+                    self.scroll_to_element(show_all_button)
+                    time.sleep(1)
                     
-                # Make sure it's actually the "Next" button
-                if 'Next' in next_button.get_attribute('aria-label'):
-                    print("Found active Next button")
-                    return next_button
-                
-                print("Button found but it's not a Next button")
-                return None
+                    try:
+                        show_all_button.click()
+                    except:
+                        self.driver.execute_script("arguments[0].click();", show_all_button)
+                    
+                    time.sleep(1)
+                    
+                    # Try to find the modal
+                    try:
+                        modal = WebDriverWait(self.driver, 3).until(
+                            EC.presence_of_element_located((
+                                By.CSS_SELECTOR,
+                                "div[role='dialog'] section"
+                            ))
+                        )
+                        amenities_text = modal.text
+                        print(amenities_text)
+                    except:
+                        print("Could not access modal, getting amenities from page...")
+                        amenities_section = WebDriverWait(self.driver, 3).until(
+                            EC.presence_of_element_located((
+                                By.CSS_SELECTOR,
+                                "div[data-section-id='AMENITIES_DEFAULT']"
+                            ))
+                        )
+                        amenities_text = amenities_section.text
+                        print(amenities_text)
                 
             except Exception as e:
-                print(f"Could not find Next button: {str(e)}")
-                return None
+                print(f"Error accessing amenities: {str(e)}")
+                amenities_text = ""
+            
+            print("="*50)
+            
+            # Add amenities analysis to the listing details
+            if amenities_text:
+                listing_details["amenities_analysis"] = self.check_amenities_with_text_matching(amenities_text)
+            
+            # Update the listing with new details
+            listing.update(listing_details)
+            
+            # Update the output files with the new details
+            self.update_output_files(listing)
+            
+            return full_text
+            
+        except Exception as e:
+            print(f"Error processing listing page: {str(e)}")
+            return None
+
+    def scrape_url(self, url):
+        """
+        Scrape Airbnb listings from all pages
+        Args:
+            url (str): Complete Airbnb search URL
+        """
+        try:
+            current_page = 1
+            all_listings = []
+            
+            # Add page parameter to URL if not present
+            if 'page=' not in url:
+                url = f"{url}&page=1" if '?' in url else f"{url}?page=1"
+            
+            while True:  # Continue until we can't find a next button
+                print(f"\n{'='*50}")
+                print(f"Processing page {current_page}")
+                print(f"{'='*50}")
+                
+                if current_page == 1:
+                    # Load first page
+                    print("\nLoading URL:", url)
+                    self.driver.get(url)
+                
+                # Handle popups
+                self.handle_popups()
+                
+                # Scrape current page
+                initial_page_text, _, initial_listings = self.scrape_initial_page_text()
+                if not initial_page_text:
+                    print("Failed to load page")
+                    break
+                
+                print(f"\nProcessed {len(initial_listings)} listings from page {current_page}")
+                all_listings.extend(initial_listings)
+                
+                # Try to find and click next button
+                next_button = self.get_next_button()
+                if next_button is None:
+                    print("\nReached last page - no more active Next button")
+                    break
+                
+                try:
+                    # Scroll to the button to make sure it's clickable
+                    self.driver.execute_script("arguments[0].scrollIntoView(true);", next_button)
+                    time.sleep(1)  # Small wait after scroll
+                    
+                    # Get the href before clicking
+                    next_url = next_button.get_attribute('href')
+                    
+                    # Try to click the button
+                    try:
+                        next_button.click()
+                    except:
+                        # If direct click fails, try JavaScript click
+                        self.driver.execute_script("arguments[0].click();", next_button)
+                    
+                    # If click seems to fail, try loading the URL directly
+                    if next_url:
+                        self.driver.get(next_url)
+                    
+                    current_page += 1
+                    print(f"\nMoving to page {current_page}...")
+                    time.sleep(2)  # Wait for page load
+                    
+                except Exception as e:
+                    print(f"Error navigating to next page: {str(e)}")
+                    break
+                    
+            print(f"\nFinished scraping {current_page} pages, found {len(all_listings)} total listings")
+            
+            # Process each listing's page
+            print("\n" + "="*50)
+            print("PROCESSING INDIVIDUAL LISTING PAGES")
+            print("="*50)
+            
+            for listing in all_listings:
+                self.process_listing_page(listing)
+            
+            return all_listings
                 
         except Exception as e:
-            print(f"Error in get_next_page_link: {str(e)}")
-            return None
+            print(f"Error in scrape_url: {str(e)}")
+            return []
 
     def update_output_files(self, listing_details):
         """Update both JSON and CSV files with new listing data"""
@@ -356,328 +531,64 @@ class AirbnbScraper:
             with open(self.json_file, 'r') as f:
                 current_data = json.load(f)
             
-            current_data.append(reformatted_data)
+            # Find and update existing entry or add new one
+            listing_url = listing_details.get("url", "")
+            entry_updated = False
             
+            for i, entry in enumerate(current_data):
+                if entry.get("Link") == listing_url:
+                    # Update existing entry
+                    current_data[i].update(reformatted_data)
+                    entry_updated = True
+                    break
+            
+            if not entry_updated:
+                # Add new entry if not found
+                current_data.append(reformatted_data)
+            
+            # Write updated JSON
             with open(self.json_file, 'w') as f:
                 json.dump(current_data, f, indent=2)
             
-            # Update CSV file
-            with open(self.csv_file, 'a', newline='', encoding='utf-8') as f:
+            # Update CSV file - rewrite entire file with updated data
+            with open(self.csv_file, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
+                # Write headers
                 writer.writerow([
-                    reformatted_data["Link"],
-                    reformatted_data["Name"],
-                    reformatted_data["Bedrooms"],
-                    reformatted_data["Beds"],
-                    reformatted_data["Bathrooms"],
-                    reformatted_data["Guest Limit"],
-                    reformatted_data["Stars"],
-                    reformatted_data["Price/Night in May"],
-                    reformatted_data["AirBnB Location Rating"],
-                    reformatted_data["Source"],
-                    reformatted_data["Amenities"],
-                    reformatted_data["TV"],
-                    reformatted_data["Pool"],
-                    reformatted_data["Jacuzzi"],
-                    reformatted_data["Historical House"],
-                    reformatted_data["Billiards Table"],
-                    reformatted_data["Large Yard"],
-                    reformatted_data["Balcony"],
-                    reformatted_data["Laundry"],
-                    reformatted_data["Home Gym"],
-                    reformatted_data["Guest Favorite Status"]
+                    "Link", "Name", "Bedrooms", "Beds", "Bathrooms", "Guest Limit",
+                    "Stars", "Price/Night in May", "AirBnB Location Rating", "Source",
+                    "Amenities", "TV", "Pool", "Jacuzzi", "Historical House",
+                    "Billiards Table", "Large Yard", "Balcony", "Laundry", "Home Gym",
+                    "Guest Favorite Status"
                 ])
-            
-            # print(f"\nUpdated output files in {self.run_dir}")
+                # Write all entries
+                for entry in current_data:
+                    writer.writerow([
+                        entry["Link"],
+                        entry["Name"],
+                        entry["Bedrooms"],
+                        entry["Beds"],
+                        entry["Bathrooms"],
+                        entry["Guest Limit"],
+                        entry["Stars"],
+                        entry["Price/Night in May"],
+                        entry["AirBnB Location Rating"],
+                        entry["Source"],
+                        entry["Amenities"],
+                        entry["TV"],
+                        entry["Pool"],
+                        entry["Jacuzzi"],
+                        entry["Historical House"],
+                        entry["Billiards Table"],
+                        entry["Large Yard"],
+                        entry["Balcony"],
+                        entry["Laundry"],
+                        entry["Home Gym"],
+                        entry["Guest Favorite Status"]
+                    ])
             
         except Exception as e:
             print(f"Error updating output files: {str(e)}")
-
-    def scrape_url(self, url, num_pages=5):
-        """
-        Scrape Airbnb listings from a direct URL with pagination
-        Args:
-            url (str): Complete Airbnb search URL
-            num_pages (int): Number of pages to scrape
-        """
-        try:
-            current_page = 1
-            all_listings = []
-            
-            # Add page parameter to URL if not present
-            if 'page=' not in url:
-                url = f"{url}&page=1" if '?' in url else f"{url}?page=1"
-            
-            while current_page <= num_pages:
-                print(f"\n{'='*50}")
-                print(f"Processing page {current_page} of {num_pages}")
-                print(f"{'='*50}")
-                
-                # Load the page
-                print("\nLoading URL:", url)
-                self.driver.get(url)
-                # time.sleep(1.5)
-                
-                # Handle popups
-                self.handle_popups()
-                
-                try:
-                    # Process grid items (existing code)
-                    print("Waiting for listings grid to load...")
-                    grid_items = WebDriverWait(self.driver, 5).until(
-                        EC.presence_of_all_elements_located((
-                            By.XPATH, 
-                            '//*[@id="site-content"]/div/div[2]/div/div/div/div/div/div'
-                        ))
-                    )
-                    print(f"Found {len(grid_items)} listings to process")
-                    
-                    original_window = self.driver.current_window_handle
-                    
-                    # Iterate through each grid item
-                    for index, item in enumerate(grid_items, 1):
-                        try:
-                            print(f"\n{'='*50}")
-                            print(f"Processing listing {index} of {len(grid_items)}")
-                            print(f"{'='*50}")
-                            
-                            # print("\nClicking listing and waiting for new tab...")
-                            try:
-                                item.click()
-                            except Exception as e:
-                                print(f"Error clicking item: {str(e)}")
-                                # Try using JavaScript click as fallback
-                                self.driver.execute_script("arguments[0].click();", item)
-                            
-                            # Switch to new tab with shorter timeout
-                            WebDriverWait(self.driver, 5).until(lambda d: len(d.window_handles) > 1)
-                            new_window = [window for window in self.driver.window_handles if window != original_window][0]
-                            self.driver.switch_to.window(new_window)
-                            # print("Successfully switched to new tab")
-
-                            # Wait for page to load
-                            time.sleep(2)  # Give the page time to load
-
-                            # Get rating and price from the new tab
-                            rating = self.get_rating_from_tab()
-                            total_price = self.get_price_from_tab()
-
-                            # Get date range from new tab with retry logic
-                            max_retries = 3
-                            retry_count = 0
-                            while retry_count < max_retries:
-                                try:
-                                    check_in_xpath = '/html/body/div[5]/div/div/div[1]/div/div[2]/div[1]/div/div/div/div[1]/main/div/div[1]/div[3]/div/div[2]/div/div/div[1]/div/div/div/div/div/div/div[1]/div[2]/div/div/div/div[1]/div/div/button/div[1]/div[2]'
-                                    check_out_xpath = '/html/body/div[5]/div/div/div[1]/div/div[2]/div[1]/div/div/div/div[1]/main/div/div[1]/div[3]/div/div[2]/div/div/div[1]/div/div/div/div/div/div/div[1]/div[2]/div/div/div/div[1]/div/div/button/div[2]/div[2]'
-                                    
-                                    # Wait for elements to be present and visible
-                                    check_in_element = WebDriverWait(self.driver, 10).until(
-                                        EC.presence_of_element_located((By.XPATH, check_in_xpath))
-                                    )
-                                    check_out_element = WebDriverWait(self.driver, 10).until(
-                                        EC.presence_of_element_located((By.XPATH, check_out_xpath))
-                                    )
-                                    
-                                    # Ensure elements are visible
-                                    WebDriverWait(self.driver, 10).until(
-                                        EC.visibility_of(check_in_element)
-                                    )
-                                    WebDriverWait(self.driver, 10).until(
-                                        EC.visibility_of(check_out_element)
-                                    )
-                                    
-                                    check_in_date = check_in_element.text.strip()
-                                    check_out_date = check_out_element.text.strip()
-                                    
-                                    if not check_in_date or not check_out_date:
-                                        raise Exception("Empty date values")
-                                    
-                                    # Parse dates and calculate nights
-                                    from datetime import datetime
-                                    check_in = datetime.strptime(check_in_date, '%m/%d/%Y')
-                                    check_out = datetime.strptime(check_out_date, '%m/%d/%Y')
-                                    num_nights = str((check_out - check_in).days)
-                                    
-                                    # print(f"Found check-in date: {check_in_date}")
-                                    # print(f"Found check-out date: {check_out_date}")
-                                    # print(f"Calculated {num_nights} nights")
-                                    
-                                    # Calculate price per night
-                                    try:
-                                        price_per_night = str(int(total_price) // int(num_nights))
-                                        print(f"Calculated ${price_per_night} per night for {num_nights} nights")
-                                    except:
-                                        price_per_night = total_price
-                                        print("Could not calculate price per night, using total price")
-                                    
-                                    break  # Success, exit retry loop
-                                        
-                                except Exception as e:
-                                    retry_count += 1
-                                    print(f"Attempt {retry_count} failed to get dates: {str(e)}")
-                                    if retry_count < max_retries:
-                                        print("Retrying...")
-                                        time.sleep(2)  # Wait before retrying
-                                    else:
-                                        print("Max retries reached, using default values")
-                                        num_nights = "2"
-                                        price_per_night = total_price
-                                        break
-
-                            # Define XPaths
-                            xpaths = {
-                                "name": '//*[@id="site-content"]/div/div[1]/div[1]/div[1]/div/div/div/div/div/section/div/div[1]/div/h1',
-                                "guests": '//*[@id="site-content"]/div/div[1]/div[3]/div/div[1]/div/div[1]/div/div/div/section/div[2]/ol/li[1]',
-                                "bedrooms": '//*[@id="site-content"]/div/div[1]/div[3]/div/div[1]/div/div[1]/div/div/div/section/div[2]/ol/li[2]',
-                                "beds": '//*[@id="site-content"]/div/div[1]/div[3]/div/div[1]/div/div[1]/div/div/div/section/div[2]/ol/li[3]',
-                                "baths": '//*[@id="site-content"]/div/div[1]/div[3]/div/div[1]/div/div[1]/div/div/div/section/div[2]/ol/li[4]',
-                                "location_rating": '//*[@id="site-content"]/div/div[1]/div[4]/div/div/div/div[2]/div/section/div[2]/div/div/div[3]/div/div/div/div/div[6]/div/div/div[2]/div[2]'
-                            }
-
-                            # Get listing details using existing XPaths and logic
-                            
-                            # Find and scroll to location rating element (it's usually at the bottom)
-                            try:
-                                location_element = WebDriverWait(self.driver, 10).until(
-                                    EC.presence_of_element_located((By.XPATH, xpaths["location_rating"]))
-                                )
-                                self.scroll_to_element(location_element)
-                            except:
-                                print("Warning: Could not find location rating section")
-
-                            # Extract all details
-                            details = {}
-                            # print("\nExtracting listing details")
-                            # print("\nExtracting listing details:")
-                            # print("-" * 30)
-                            for key, xpath in xpaths.items():
-                                try:
-                                    element = WebDriverWait(self.driver, 5).until(  # Reduced from 10 to 5
-                                        EC.presence_of_element_located((By.XPATH, xpath))
-                                    )
-                                    details[key] = element.text
-                                    # print(f"{key}: {details[key]}")
-                                except:
-                                    details[key] = "N/A"
-                                    print(f"{key}: N/A (not found)")
-                            
-                            # Process details and create listing object
-                            listing_details = {
-                                "name": details["name"],
-                                "guest_limit": self._extract_number(details["guests"]),
-                                "bedrooms": self._extract_number(details["bedrooms"]),
-                                "beds": self._extract_number(details["beds"]),
-                                "bathrooms": self._extract_number(details["baths"]),
-                                "stars": rating,
-                                "review_count": details.get("reviews", "0"),
-                                "price_per_night": price_per_night,
-                                "total_price": total_price,
-                                "number_of_nights": num_nights,
-                                "location_rating": details.get("location_rating", "N/A"),
-                                "url": self.driver.current_url
-                            }
-                            
-                            try:
-                                # Check for Guest Favorite badge
-                                try:
-                                    guest_favorite = self.driver.find_element(
-                                        By.XPATH,
-                                        '//*[@id="site-content"]/div/div[1]/div[4]/div/div/div/div[2]/div/section/div[1]/div[2]'
-                                    ).is_displayed()
-                                    # print(f"Guest Favorite: {guest_favorite}")
-                                except:
-                                    guest_favorite = False
-                                    print("Guest Favorite badge not found")
-
-                                # Get full page content for historical analysis
-                                full_content = self.driver.find_element(
-                                    By.XPATH,
-                                    '//*[@id="site-content"]/div/div[1]'
-                                ).text
-
-                                # Update listing_details with new information
-                                listing_details.update({
-                                    "is_guest_favorite": guest_favorite
-                                })
-
-                                # Get amenities text
-                                amenities_text = self.get_amenities_text()
-                                if amenities_text:
-                                    print("Analyzing amenities with text matching...")
-                                    amenities_analysis = self.check_amenities_with_text_matching(amenities_text)
-                                    if amenities_analysis:
-                                        listing_details["amenities_analysis"] = amenities_analysis
-                                        # print("\nAmenities analysis:")
-                                        # print(json.dumps(amenities_analysis, indent=2))
-                            except Exception as e:
-                                print(f"Error processing amenities: {str(e)}")
-                                listing_details["amenities_analysis"] = {}
-                            
-                            # print("\nProcessed listing details.")
-                            # print("\nProcessed listing details:")
-                            # print("-" * 30)
-                            # print(json.dumps(listing_details, indent=2))
-                            
-                            # After all extractions, check for missing fields
-                            missing_fields = [k for k, v in listing_details.items() if v == "N/A"]
-                            if missing_fields:
-                                print(f"\nAttempting to extract missing fields: {missing_fields}")
-                                additional_details = self.extract_missing_details(full_content, missing_fields)
-                                for field, value in additional_details.items():
-                                    if field in missing_fields and value:
-                                        listing_details[field] = value
-                                        print(f"Updated {field} to: {value}")
-
-                            all_listings.append(listing_details)
-                            self.update_output_files(listing_details)  # Update files in real-time
-
-                            # After all processing is done, close current tab and switch back to grid
-                            # print("\nClosing listing tab and returning to grid...")
-                            self.driver.close()
-                            self.driver.switch_to.window(original_window)
-                            print("Successfully returned to grid view")
-                        
-                        except Exception as e:
-                            print(f"\nError processing listing {index}: {str(e)}")
-                            # Make sure we're back on the original window
-                            if len(self.driver.window_handles) > 1 and self.driver.current_window_handle != original_window:
-                                print("Closing error tab and switching back to main window...")
-                                self.driver.close()
-                                self.driver.switch_to.window(original_window)
-                    
-                    print(f"\n{'='*50}")
-                    print(f"Final Results - Successfully processed {len(all_listings)} listings")
-                    print(f"{'='*50}")
-                    print(json.dumps(all_listings, indent=2))
-                    
-                    # After processing all items in the current page
-                    if current_page < num_pages:
-                        # Find and click next page link
-                        next_page = self.get_next_page_link()
-                        if next_page:
-                            url = next_page.get_attribute('href')
-                            current_page += 1
-                            print(f"\nMoving to page {current_page}...")
-                            continue
-                        else:
-                            print("\nNo more pages available, ending scrape")
-                    break
-                    
-                    current_page += 1
-                    
-                except Exception as e:
-                    print(f"Error processing page {current_page}: {str(e)}")
-                    break
-                    
-                except TimeoutException:
-                    print("Timeout waiting for listings to load")
-                except Exception as e:
-                    print(f"Error processing listings: {str(e)}")
-                
-        except Exception as e:
-            print(f"Error in scrape_url: {str(e)}")
-        
-        return all_listings
     
     def _calculate_price_per_night(self, details):
         """Helper method to calculate price per night"""
@@ -806,77 +717,367 @@ class AirbnbScraper:
             return "N/A"
 
     def check_amenities_with_text_matching(self, amenities_text):
-        """Check amenities using text matching with comprehensive variations"""
-        amenity_variations = {
-            "TV": [
-                "tv", "television", "smart tv", "cable tv", "hdtv", "roku", 
-                "netflix", "streaming", "apple tv", "flat screen"
-            ],
-            "Pool": [
-                "pool", "swimming pool", "outdoor pool", "indoor pool", 
-                "heated pool", "lap pool", "plunge pool"
-            ],
-            "Jacuzzi": [
-                "jacuzzi", "hot tub", "whirlpool", "jetted tub", 
-                "soaking tub", "spa tub"
-            ],
-            "Billiards/Pool Table": [
-                "pool table", "billiards", "billiard table", "game table", 
-                "gaming table", "pool cue"
-            ],
-            "Large Yard": [
-                "yard", "garden", "backyard", "outdoor space", "patio", 
-                "lawn", "courtyard", "grounds"
-            ],
-            "Balcony": [
-                "balcony", "deck", "terrace", "porch", "veranda", 
-                "outdoor deck", "private balcony"
-            ],
-            "Laundry": [
-                "laundry", "washer", "dryer", "washing machine", "laundromat",
-                "clothes washer", "clothes dryer", "washer/dryer"
-            ],
-            "Home Gym": [
-                "gym", "fitness", "exercise", "workout", "weight", 
-                "treadmill", "exercise equipment", "fitness room"
-            ]
-        }
-        
+        """Check amenities using exact text matching"""
         # Convert amenities text to lowercase for case-insensitive matching
         amenities_text_lower = amenities_text.lower()
         
         # Initialize results dictionary
         results = {
-            amenity: False for amenity in amenity_variations.keys()
+            "Pool": False,
+            "Jacuzzi": False,
+            "Home Gym": False
         }
         
-        # Store evidence of matches
-        evidence = {}
-        
-        # Check each amenity
-        for amenity, variations in amenity_variations.items():
-            matches = []
-            for variation in variations:
-                if variation in amenities_text_lower:
-                    matches.append(variation)
+        # Check for pool (excluding pool table)
+        pool_index = amenities_text_lower.find("pool")
+        while pool_index != -1:
+            # Get some context around the match
+            start = max(0, pool_index - 10)
+            end = min(len(amenities_text_lower), pool_index + 14)  # pool + table + some extra
+            context = amenities_text_lower[start:end]
             
-            if matches:
-                results[amenity] = True
-                # Get some context around the first match
-                first_match = matches[0]
-                index = amenities_text_lower.find(first_match)
-                start = max(0, index - 50)
-                end = min(len(amenities_text), index + len(first_match) + 50)
-                context = amenities_text[start:end].strip()
-                evidence[amenity] = {
-                    "matched_terms": matches,
-                    "context": context
-                }
+            # If "pool table" is not in the context, count it as a pool
+            if "pool table" not in context and "billiard" not in context:
+                results["Pool"] = True
+                break
+            
+            # Look for next occurrence
+            pool_index = amenities_text_lower.find("pool", pool_index + 1)
         
-        # Add evidence to results
-        # results["_evidence"] = evidence
+        # Check for exact "jacuzzi"
+        if "jacuzzi" in amenities_text_lower:
+            results["Jacuzzi"] = True
+        
+        # Check for exact "gym"
+        if "gym" in amenities_text_lower:
+            results["Home Gym"] = True
+        
+        print("\nAmenities found:")
+        print(f"Pool: {results['Pool']}")
+        print(f"Jacuzzi: {results['Jacuzzi']}")
+        print(f"Gym: {results['Home Gym']}")
         
         return results
+
+    def scrape_page_text(self):
+        """Scrape and log all text from the current page using BeautifulSoup"""
+        try:
+            # Get the page source
+            page_source = self.driver.page_source
+            
+            # Parse with BeautifulSoup
+            soup = BeautifulSoup(page_source, 'html.parser')
+            
+            # Get all text, removing extra whitespace
+            all_text = ' '.join(soup.stripped_strings)
+            
+            # Log the text
+            print("\n" + "="*50)
+            print("PAGE TEXT CONTENT:")
+            print("="*50)
+            # print(all_text)
+            print("="*50 + "\n")
+            
+            return all_text
+            
+        except Exception as e:
+            print(f"Error scraping page text: {str(e)}")
+            return None
+
+    def extract_price_per_night(self, page_text):
+        """
+        Extract price per night from page text using regex pattern matching
+        Args:
+            page_text (str): The full text content of the page
+        Returns:
+            str: The price per night as a string, or "N/A" if not found
+        """
+        try:
+            # First try the price breakdown pattern
+            breakdown_pattern = r"Show price breakdown \$([\d,]+) for (\d+) nights"
+            breakdown_match = re.search(breakdown_pattern, page_text)
+            
+            if breakdown_match:
+                total_price = breakdown_match.group(1).replace(',', '')  # Remove commas
+                num_nights = int(breakdown_match.group(2))
+                
+                # Calculate price per night
+                price_per_night = int(total_price) // num_nights
+                
+                print(f"\nFound price breakdown: ${total_price} for {num_nights} nights")
+                print(f"Calculated price per night: ${price_per_night}")
+                
+                return str(price_per_night)
+            
+            # Fallback: Try to find total price pattern like "Location $2,177 total"
+            total_price_pattern = r"\$([\d,]+)\s+total"
+            total_match = re.search(total_price_pattern, page_text)
+            
+            if total_match:
+                total_price = total_match.group(1).replace(',', '')  # Remove commas
+                print(f"\nFound total price: ${total_price}")
+                
+                # If we have the number of nights from the initial page, use it
+                if hasattr(self, 'num_nights') and self.num_nights:
+                    price_per_night = int(total_price) // self.num_nights
+                    print(f"Using {self.num_nights} nights from initial page")
+                    print(f"Calculated price per night: ${price_per_night}")
+                    return str(price_per_night)
+                else:
+                    print("No number of nights found, returning total price")
+                    return total_price
+
+            print("Could not find any price pattern in page text")
+            return "N/A"
+                
+        except Exception as e:
+            print(f"Error extracting price per night: {str(e)}")
+            return "N/A"
+
+    def extract_max_pages(self, text):
+        """Extract the maximum number of pages from the initial search text"""
+        try:
+            # Look for numbered page buttons like "1 2 3 4 5 6"
+            page_numbers = re.findall(r'\b\d+\b(?=\s+(?:\d+\s+)*(?:Centered|Google|Map))', text)
+            if page_numbers:
+                return max(map(int, page_numbers))
+            return 1
+        except Exception as e:
+            print(f"Error extracting max pages: {str(e)}")
+            return 1
+
+    def extract_initial_listings(self, text):
+        """Extract initial listing details from search page text and grid items"""
+        try:
+            # Wait for and get grid items
+            grid_items = WebDriverWait(self.driver, 10).until(
+                EC.presence_of_all_elements_located((
+                    By.XPATH, 
+                    '//*[@id="site-content"]/div/div[2]/div/div/div/div/div/div'
+                ))
+            )
+            print(f"\nFound {len(grid_items)} grid items to process")
+            
+            listings = []
+            for item in grid_items:
+                try:
+                    # Get name using the listing-card-name data-testid
+                    name_element = item.find_element(By.CSS_SELECTOR, 'span[data-testid="listing-card-name"]')
+                    name = name_element.text if name_element else "N/A"
+                    
+                    # Get link from the parent anchor tag that wraps the entire card
+                    link_element = item.find_element(By.CSS_SELECTOR, 'a[href*="/rooms/"]')
+                    link = link_element.get_attribute('href') if link_element else "N/A"
+                    
+                    # Get the text content of this specific grid item
+                    item_text = item.text
+                    
+                    # Extract price - look for price breakdown pattern
+                    price_match = re.search(r'\$(\d+(?:,\d+)?)\s+for\s+(\d+)\s+nights', item_text)
+                    if price_match:
+                        total_price = int(price_match.group(1).replace(',', ''))
+                        num_nights = int(price_match.group(2))
+                        price_per_night = total_price // num_nights
+                    else:
+                        # Fallback to just finding the last price mentioned
+                        prices = re.findall(r'\$(\d+(?:,\d+)?)', item_text)
+                        total_price = int(prices[-1].replace(',', '')) if prices else 0
+                        price_per_night = total_price // 2  # Assume 2 nights if not specified
+                    
+                    # Extract rating
+                    rating_match = re.search(r'([\d.]+)\s+out of 5\s+average rating,\s+(\d+)\s+reviews', item_text)
+                    if not rating_match:
+                        rating_match = re.search(r'([\d.]+)\s+\((\d+)\)', item_text)
+                    
+                    rating = rating_match.group(1) if rating_match else "N/A"
+                    review_count = rating_match.group(2) if rating_match else "0"
+                    
+                    # Check for guest favorite status
+                    is_guest_favorite = "Guest favorite" in item_text
+                    is_top_guest_favorite = "Top guest favorite" in item_text
+                    
+                    # Get location from the text before the property name
+                    location = item_text.split(name)[0].replace("Home in", "").strip() if name != "N/A" else "N/A"
+                    
+                    listing_details = {
+                        "name": name,
+                        "url": link,
+                        "location": location,
+                        "price_per_night": str(price_per_night),
+                        "total_price": str(total_price),
+                        "rating": rating,
+                        "review_count": review_count,
+                        "is_guest_favorite": is_top_guest_favorite or is_guest_favorite,
+                        "is_top_guest_favorite": is_top_guest_favorite,
+                        "nights": num_nights if 'num_nights' in locals() else 2
+                    }
+                    
+                    # print(f"\nExtracted listing details: {listing_details}")
+                    listings.append(listing_details)
+                    
+                    # Update output files immediately with initial data
+                    self.update_output_files({
+                        "url": listing_details["url"],
+                        "name": listing_details["name"],
+                        "price_per_night": listing_details["price_per_night"],
+                        "total_price": listing_details["total_price"],
+                        "location": listing_details["location"],
+                        "stars": listing_details["rating"],
+                        "review_count": listing_details["review_count"],
+                        "location_rating": "N/A",
+                        "bedrooms": "N/A",
+                        "beds": "N/A",
+                        "bathrooms": "N/A",
+                        "guest_limit": "N/A",
+                        "amenities_analysis": {},
+                        "is_historical": False,
+                        "is_guest_favorite": listing_details["is_guest_favorite"],
+                        "is_top_guest_favorite": listing_details["is_top_guest_favorite"],
+                        "nights": listing_details["nights"]
+                    })
+                    
+                except Exception as e:
+                    print(f"Error processing individual listing: {str(e)}")
+                    continue
+            
+            return listings
+            
+        except Exception as e:
+            print(f"Error extracting initial listings: {str(e)}")
+            return []
+
+    def scrape_initial_page_text(self):
+        """Scrape and log all text from the initial search results page"""
+        try:
+            # Wait for the page to load by checking for a common element
+            WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((
+                    By.XPATH,
+                    '//*[@id="site-content"]/div/div[2]/div/div/div/div/div/div'
+                ))
+            )
+            
+            # Get the page source
+            page_source = self.driver.page_source
+            
+            # Parse with BeautifulSoup
+            soup = BeautifulSoup(page_source, 'html.parser')
+            
+            # Get all text, removing extra whitespace
+            all_text = ' '.join(soup.stripped_strings)
+            
+            # Extract max pages and initial listings
+            max_pages = self.extract_max_pages(all_text)
+            initial_listings = self.extract_initial_listings(all_text)
+            
+            print(f"\nFound {len(initial_listings)} listings on initial page")
+            print(f"Maximum pages: {max_pages}")
+            
+            return all_text, max_pages, initial_listings
+            
+        except Exception as e:
+            print(f"Error scraping initial page text: {str(e)}")
+            return None, 1, []
+
+    def extract_nights_from_text(self, text):
+        """
+        Extract the number of nights from the initial page text
+        Args:
+            text (str): The text content from the initial page
+        Returns:
+            int: Number of nights, or None if not found
+        """
+        try:
+            # Pattern to match dates like "Check out May 23 – 25"
+            pattern = r"Check out.*?(\d+)\s*[–-]\s*(\d+)"
+            match = re.search(pattern, text)
+            
+            if match:
+                start_day = int(match.group(1))
+                end_day = int(match.group(2))
+                nights = end_day - start_day
+                print(f"Found {nights} nights from dates {start_day} to {end_day}")
+                return nights
+            else:
+                print("Could not find date range in text")
+                return None
+                
+        except Exception as e:
+            print(f"Error extracting nights from text: {str(e)}")
+            return None
+
+    def extract_listing_details(self, page_text):
+        """Extract specific details from listing page text"""
+        try:
+            details = {
+                "bedrooms": "N/A",
+                "beds": "N/A",
+                "bathrooms": "N/A",
+                "guest_limit": "N/A",
+                "is_guest_favorite": False
+            }
+            
+            # Find the list items containing the details
+            try:
+                # The parent div containing all the details
+                details_container = self.driver.find_element(By.CSS_SELECTOR, "div.ok4wssy")
+                
+                # Find all list items with the specific class
+                detail_items = details_container.find_elements(By.CSS_SELECTOR, "li.l7n4lsf")
+                
+                for item in detail_items:
+                    try:
+                        # Get the text content of the item
+                        item_text = item.text.strip()
+                        
+                        # Check which detail this is
+                        if "guest" in item_text.lower():
+                            # Extract guest limit, handling both "X guests" and "X+ guests" formats
+                            guest_num = re.search(r'(\d+)(?:\+)?\s*guests?', item_text)
+                            if guest_num:
+                                details["guest_limit"] = guest_num.group(1)
+                        elif "bedroom" in item_text.lower():
+                            details["bedrooms"] = ''.join(filter(str.isdigit, item_text))
+                        elif "bed" in item_text.lower() and "bedroom" not in item_text.lower():
+                            details["beds"] = ''.join(filter(str.isdigit, item_text))
+                        elif "bath" in item_text.lower():
+                            # For bathrooms, keep decimal points
+                            bath_num = re.search(r'([\d.]+)', item_text)
+                            if bath_num:
+                                details["bathrooms"] = bath_num.group(1)
+                    except Exception as e:
+                        print(f"Error processing detail item: {str(e)}")
+                        continue
+                        
+            except Exception as e:
+                print(f"Error finding details container: {str(e)}")
+            
+            # Check for guest favorite status using the page text
+            guest_favorite_patterns = [
+                "Guest favorite",
+                "One of the most loved homes on Airbnb",
+                "This home is in the top 5% of eligible listings"
+            ]
+            details["is_guest_favorite"] = any(pattern in page_text for pattern in guest_favorite_patterns)
+            
+            print("\nExtracted listing details:")
+            print(f"Guest Limit: {details['guest_limit']}")
+            print(f"Bedrooms: {details['bedrooms']}")
+            print(f"Beds: {details['beds']}")
+            print(f"Bathrooms: {details['bathrooms']}")
+            print(f"Guest Favorite: {details['is_guest_favorite']}")
+            
+            return details
+            
+        except Exception as e:
+            print(f"Error extracting listing details: {str(e)}")
+            return {
+                "bedrooms": "N/A",
+                "beds": "N/A",
+                "bathrooms": "N/A",
+                "guest_limit": "N/A",
+                "is_guest_favorite": False
+            }
 
 def main():
     # Example usage
@@ -885,10 +1086,9 @@ def main():
     try:
         # Get the Airbnb search URL from user
         url = input("Enter the complete Airbnb search URL: ")
-        num_pages = int(input("Enter number of pages to scrape (default 5): ") or 5)
         
         print(f"\nScraping Airbnb listings...")
-        scraper.scrape_url(url, num_pages=num_pages)
+        scraper.scrape_url(url)
         
         # Save results
         scraper.save_results()
