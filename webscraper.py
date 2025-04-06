@@ -324,6 +324,39 @@ class AirbnbScraper:
             except:
                 return None  # Return None if we couldn't find any Next button
     
+    def process_listing_page(self, listing):
+        """Process an individual listing page and extract its full text"""
+        try:
+            print(f"\nProcessing listing: {listing['name']}")
+            print(f"URL: {listing['url']}")
+            
+            # Load the listing page
+            self.driver.get(listing['url'])
+            time.sleep(2)  # Wait for page load
+            
+            # Handle any popups
+            self.handle_popups()
+            
+            # Get the full page text
+            page_source = self.driver.page_source
+            soup = BeautifulSoup(page_source, 'html.parser')
+            full_text = ' '.join(soup.stripped_strings)
+            
+            # Extract specific details
+            listing_details = self.extract_listing_details(full_text)
+            
+            # Update the listing with new details
+            listing.update(listing_details)
+            
+            # Update the output files with the new details
+            self.update_output_files(listing)
+            
+            return full_text
+            
+        except Exception as e:
+            print(f"Error processing listing page: {str(e)}")
+            return None
+
     def scrape_url(self, url):
         """
         Scrape Airbnb listings from all pages
@@ -394,6 +427,15 @@ class AirbnbScraper:
                     break
             
             print(f"\nFinished scraping {current_page} pages, found {len(all_listings)} total listings")
+            
+            # Process each listing's page
+            print("\n" + "="*50)
+            print("PROCESSING INDIVIDUAL LISTING PAGES")
+            print("="*50)
+            
+            for listing in all_listings:
+                self.process_listing_page(listing)
+            
             return all_listings
             
         except Exception as e:
@@ -432,39 +474,61 @@ class AirbnbScraper:
             with open(self.json_file, 'r') as f:
                 current_data = json.load(f)
             
-            current_data.append(reformatted_data)
+            # Find and update existing entry or add new one
+            listing_url = listing_details.get("url", "")
+            entry_updated = False
             
+            for i, entry in enumerate(current_data):
+                if entry.get("Link") == listing_url:
+                    # Update existing entry
+                    current_data[i].update(reformatted_data)
+                    entry_updated = True
+                    break
+            
+            if not entry_updated:
+                # Add new entry if not found
+                current_data.append(reformatted_data)
+            
+            # Write updated JSON
             with open(self.json_file, 'w') as f:
                 json.dump(current_data, f, indent=2)
             
-            # Update CSV file
-            with open(self.csv_file, 'a', newline='', encoding='utf-8') as f:
+            # Update CSV file - rewrite entire file with updated data
+            with open(self.csv_file, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
+                # Write headers
                 writer.writerow([
-                    reformatted_data["Link"],
-                    reformatted_data["Name"],
-                    reformatted_data["Bedrooms"],
-                    reformatted_data["Beds"],
-                    reformatted_data["Bathrooms"],
-                    reformatted_data["Guest Limit"],
-                    reformatted_data["Stars"],
-                    reformatted_data["Price/Night in May"],
-                    reformatted_data["AirBnB Location Rating"],
-                    reformatted_data["Source"],
-                    reformatted_data["Amenities"],
-                    reformatted_data["TV"],
-                    reformatted_data["Pool"],
-                    reformatted_data["Jacuzzi"],
-                    reformatted_data["Historical House"],
-                    reformatted_data["Billiards Table"],
-                    reformatted_data["Large Yard"],
-                    reformatted_data["Balcony"],
-                    reformatted_data["Laundry"],
-                    reformatted_data["Home Gym"],
-                    reformatted_data["Guest Favorite Status"]
+                    "Link", "Name", "Bedrooms", "Beds", "Bathrooms", "Guest Limit",
+                    "Stars", "Price/Night in May", "AirBnB Location Rating", "Source",
+                    "Amenities", "TV", "Pool", "Jacuzzi", "Historical House",
+                    "Billiards Table", "Large Yard", "Balcony", "Laundry", "Home Gym",
+                    "Guest Favorite Status"
                 ])
-            
-            # print(f"\nUpdated output files in {self.run_dir}")
+                # Write all entries
+                for entry in current_data:
+                    writer.writerow([
+                        entry["Link"],
+                        entry["Name"],
+                        entry["Bedrooms"],
+                        entry["Beds"],
+                        entry["Bathrooms"],
+                        entry["Guest Limit"],
+                        entry["Stars"],
+                        entry["Price/Night in May"],
+                        entry["AirBnB Location Rating"],
+                        entry["Source"],
+                        entry["Amenities"],
+                        entry["TV"],
+                        entry["Pool"],
+                        entry["Jacuzzi"],
+                        entry["Historical House"],
+                        entry["Billiards Table"],
+                        entry["Large Yard"],
+                        entry["Balcony"],
+                        entry["Laundry"],
+                        entry["Home Gym"],
+                        entry["Guest Favorite Status"]
+                    ])
             
         except Exception as e:
             print(f"Error updating output files: {str(e)}")
@@ -914,6 +978,79 @@ class AirbnbScraper:
         except Exception as e:
             print(f"Error extracting nights from text: {str(e)}")
             return None
+
+    def extract_listing_details(self, page_text):
+        """Extract specific details from listing page text"""
+        try:
+            details = {
+                "bedrooms": "N/A",
+                "beds": "N/A",
+                "bathrooms": "N/A",
+                "guest_limit": "N/A",
+                "is_guest_favorite": False
+            }
+            
+            # Find the list items containing the details
+            try:
+                # The parent div containing all the details
+                details_container = self.driver.find_element(By.CSS_SELECTOR, "div.ok4wssy")
+                
+                # Find all list items with the specific class
+                detail_items = details_container.find_elements(By.CSS_SELECTOR, "li.l7n4lsf")
+                
+                for item in detail_items:
+                    try:
+                        # Get the text content of the item
+                        item_text = item.text.strip()
+                        
+                        # Check which detail this is
+                        if "guest" in item_text.lower():
+                            # Extract guest limit (e.g., "8 guests")
+                            guest_num = re.search(r'(\d+)\s*guests?', item_text)
+                            if guest_num:
+                                details["guest_limit"] = guest_num.group(1)
+                        elif "bedroom" in item_text.lower():
+                            details["bedrooms"] = ''.join(filter(str.isdigit, item_text))
+                        elif "bed" in item_text.lower() and "bedroom" not in item_text.lower():
+                            details["beds"] = ''.join(filter(str.isdigit, item_text))
+                        elif "bath" in item_text.lower():
+                            # For bathrooms, keep decimal points
+                            bath_num = re.search(r'([\d.]+)', item_text)
+                            if bath_num:
+                                details["bathrooms"] = bath_num.group(1)
+                    except Exception as e:
+                        print(f"Error processing detail item: {str(e)}")
+                        continue
+                        
+            except Exception as e:
+                print(f"Error finding details container: {str(e)}")
+            
+            # Check for guest favorite status using the page text
+            guest_favorite_patterns = [
+                "Guest favorite",
+                "One of the most loved homes on Airbnb",
+                "This home is in the top 5% of eligible listings"
+            ]
+            details["is_guest_favorite"] = any(pattern in page_text for pattern in guest_favorite_patterns)
+            
+            print("\nExtracted listing details:")
+            print(f"Guest Limit: {details['guest_limit']}")
+            print(f"Bedrooms: {details['bedrooms']}")
+            print(f"Beds: {details['beds']}")
+            print(f"Bathrooms: {details['bathrooms']}")
+            print(f"Guest Favorite: {details['is_guest_favorite']}")
+            
+            return details
+            
+        except Exception as e:
+            print(f"Error extracting listing details: {str(e)}")
+            return {
+                "bedrooms": "N/A",
+                "beds": "N/A",
+                "bathrooms": "N/A",
+                "guest_limit": "N/A",
+                "is_guest_favorite": False
+            }
 
 def main():
     # Example usage
